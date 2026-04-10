@@ -15,8 +15,6 @@ import (
 	"net/http"
 	"time"
 
-	admissionregistrationv1 "k8s.io/api/admission/v1"
-	registrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,12 +48,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-)
-
-// Keep these to suppress unused import warnings from the test framework.
-var (
-	_ = admissionregistrationv1.SchemeGroupVersion
-	_ = registrationv1.SchemeGroupVersion
 )
 
 var _ = Describe("Dependency Controller", Ordered, func() {
@@ -99,7 +91,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				Versions: []apisv1alpha1.APIResourceVersion{{
 					Name: "v1alpha1", Storage: true, Served: true,
 					Schema: runtime.RawExtension{
-						Raw: []byte(`{"type":"object","properties":{"spec":{"type":"object","properties":{"dependent":{"type":"object","properties":{"apiExportRef":{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"}}},"group":{"type":"string"},"version":{"type":"string"},"kind":{"type":"string"},"resource":{"type":"string"}}},"dependencies":{"type":"array","items":{"type":"object","properties":{"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string"},"fieldRef":{"type":"object","properties":{"path":{"type":"string"}}}}}}}}}}`),
+						Raw: []byte(`{"type":"object","properties":{"spec":{"type":"object","properties":{"dependent":{"type":"object","properties":{"apiExportRef":{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"}}},"group":{"type":"string"},"version":{"type":"string"},"kind":{"type":"string"},"resource":{"type":"string"}}},"dependencies":{"type":"array","items":{"type":"object","properties":{"apiExportRef":{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"}}},"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string"},"fieldRef":{"type":"object","properties":{"path":{"type":"string"}}}}}}}}}}`),
 					},
 				}},
 			},
@@ -118,7 +110,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 					Name: "v1alpha1", Storage: true, Served: true,
 					Schema: runtime.RawExtension{
 						Raw: []byte(`{"type":"object","properties":{"spec":{"type":"object","properties":{"dependent":{"type":"object","properties":{"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},"dependency":{"type":"object","properties":{"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},"ruleName":{"type":"string"}}}}}`),
-					},
+						},
 				}},
 			},
 		}
@@ -197,8 +189,9 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 
 		// === APIBindings ===
 
-		// Compute provider binds to dep-ctrl (to create DependencyRules).
+		// Both providers bind to dep-ctrl.
 		createBinding(ctx, cli, computeProvPath, "dependencies.opendefense.cloud", depCtrlPath)
+		createBinding(ctx, cli, networkProvPath, "dependencies.opendefense.cloud", depCtrlPath)
 
 		// Consumer workspaces bind to all three exports.
 		for _, cp := range []logicalcluster.Path{consumer1Path, consumer2Path} {
@@ -230,6 +223,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		// === Wait for all bindings to be bound ===
 
 		waitForBinding(ctx, cli, computeProvPath, "dependencies.opendefense.cloud")
+		waitForBinding(ctx, cli, networkProvPath, "dependencies.opendefense.cloud")
 		for _, cp := range []logicalcluster.Path{consumer1Path, consumer2Path} {
 			waitForBinding(ctx, cli, cp, "dependencies.opendefense.cloud")
 			waitForBinding(ctx, cli, cp, "network.test.io")
@@ -255,6 +249,10 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			}
 		}
 
+		// === Set up the webhook server ===
+
+		caBundle, webhookURL := startWebhookServer(ctx)
+
 		// === Set up the dependency-controller ===
 
 		depCtrlConfig := rest.CopyConfig(kcpConfig)
@@ -270,9 +268,11 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		// The DependencyRule reconciler is multicluster — it watches DependencyRules
-		// via the dep-ctrl's APIExport and dynamically creates managers for dependent APIExports.
+		// Create the webhook installer and DependencyRule reconciler.
+		webhookInstaller := controller.NewWebhookInstaller(kcpConfig, webhookURL, caBundle)
+
 		ruleReconciler := controller.NewDependencyRuleReconciler(mgr, kcpConfig, scheme.Scheme)
+		ruleReconciler.WebhookInstaller = webhookInstaller
 
 		err = mcbuilder.ControllerManagedBy(mgr).
 			Named("dependencyrule").
@@ -280,24 +280,8 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			Complete(mcreconcile.Func(ruleReconciler.Reconcile))
 		Expect(err).NotTo(HaveOccurred())
 
-		// === Set up the webhook server ===
-
-		caBundle, webhookURL := startWebhookServer(ctx, &depwebhook.DeletionValidator{Manager: mgr})
-
-		// Register ValidatingWebhookConfiguration in all provider workspaces.
-		// kcp's admission plugin resolves the APIBinding to find the source workspace,
-		// then dispatches the admission request to webhooks configured there.
-		for _, providerWS := range []struct {
-			path     logicalcluster.Path
-			group    string
-			resource string
-			version  string
-		}{
-			{networkProvPath, "network.test.io", "vpcs", "v1"},
-			{computeProvPath, "compute.test.io", "virtualmachines", "v1"},
-		} {
-			installWebhook(ctx, cli, providerWS.path, caBundle, webhookURL, providerWS.group, providerWS.resource, providerWS.version)
-		}
+		// Wire up the webhook handler with the dep-ctrl manager.
+		webhookHandler = &depwebhook.DeletionValidator{Manager: mgr}
 
 		// Start the manager.
 		go func() {
@@ -333,6 +317,10 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 					},
 					Dependencies: []v1alpha1.DependencyTarget{
 						{
+							APIExportRef: v1alpha1.APIExportReference{
+								Path: networkProvPath.String(),
+								Name: "network.test.io",
+							},
 							Group:    "network.test.io",
 							Version:  "v1",
 							Resource: "vpcs",
@@ -436,10 +424,15 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 	})
 })
 
+// webhookHandler is set during BeforeAll and used by the webhook server.
+var webhookHandler admission.Handler
+
 // startWebhookServer generates a self-signed CA and server cert, starts an HTTPS
-// server on a random port serving the given handler at /validate-deletion,
+// server on a random port serving the DeletionValidator at /validate-deletion,
 // and returns the PEM-encoded CA bundle and the webhook URL.
-func startWebhookServer(ctx context.Context, handler admission.Handler) (caBundle []byte, url string) {
+// The handler is wired up lazily via the package-level webhookHandler variable
+// so that the manager can be created after the server starts.
+func startWebhookServer(ctx context.Context) (caBundle []byte, url string) {
 	// Generate self-signed CA.
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
@@ -490,9 +483,17 @@ func startWebhookServer(ctx context.Context, handler admission.Handler) (caBundl
 
 	port := listener.Addr().(*net.TCPAddr).Port
 
-	// Wire up the admission handler.
+	// Wire up the admission handler via a lazy wrapper that delegates to
+	// the package-level webhookHandler (set once the manager is ready).
 	mux := http.NewServeMux()
-	mux.Handle("/validate-deletion", &webhook.Admission{Handler: handler})
+	mux.Handle("/validate-deletion", &webhook.Admission{Handler: admission.HandlerFunc(
+		func(ctx context.Context, req admission.Request) admission.Response {
+			if webhookHandler == nil {
+				return admission.Allowed("webhook not ready")
+			}
+			return webhookHandler.Handle(ctx, req)
+		},
+	)})
 
 	server := &http.Server{Handler: mux}
 	go func() {
@@ -507,45 +508,6 @@ func startWebhookServer(ctx context.Context, handler admission.Handler) (caBundl
 	}()
 
 	return caPEM, fmt.Sprintf("https://127.0.0.1:%d/validate-deletion", port)
-}
-
-// installWebhook creates a ValidatingWebhookConfiguration in the given provider
-// workspace. kcp's admission plugin dispatches webhook calls to the workspace
-// that owns the APIExport for the resource being modified.
-func installWebhook(
-	ctx context.Context,
-	cli clusterclient.ClusterClient,
-	wsPath logicalcluster.Path,
-	caBundle []byte,
-	webhookURL string,
-	group, resource, version string,
-) {
-	failPolicy := registrationv1.Fail
-	sideEffects := registrationv1.SideEffectClassNone
-	whCfg := &registrationv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: fmt.Sprintf("dep-ctrl-%s", resource),
-		},
-		Webhooks: []registrationv1.ValidatingWebhook{{
-			Name:                    fmt.Sprintf("dep-ctrl.%s.%s", resource, group),
-			AdmissionReviewVersions: []string{"v1"},
-			ClientConfig: registrationv1.WebhookClientConfig{
-				URL:      &webhookURL,
-				CABundle: caBundle,
-			},
-			FailurePolicy: &failPolicy,
-			SideEffects:   &sideEffects,
-			Rules: []registrationv1.RuleWithOperations{{
-				Operations: []registrationv1.OperationType{registrationv1.Delete},
-				Rule: registrationv1.Rule{
-					APIGroups:   []string{group},
-					APIVersions: []string{version},
-					Resources:   []string{resource},
-				},
-			}},
-		}},
-	}
-	ExpectWithOffset(1, cli.Cluster(wsPath).Create(ctx, whCfg)).To(Succeed())
 }
 
 // createBinding creates an APIBinding in the given workspace.

@@ -54,6 +54,10 @@ type APIExportReference struct {
 
 // DependencyTarget describes a resource type that the dependent depends on.
 type DependencyTarget struct {
+	// APIExportRef references the APIExport that provides this dependency resource type.
+	// Used by the webhook installer to register deletion protection in the correct workspace.
+	APIExportRef APIExportReference `json:"apiExportRef"`
+
 	// Group is the API group of the dependency resource.
 	Group string `json:"group"`
 

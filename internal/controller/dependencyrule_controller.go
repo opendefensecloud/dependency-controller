@@ -37,6 +37,10 @@ type DependencyRuleReconciler struct {
 	// Scheme is the runtime scheme used when creating dynamic managers.
 	Scheme *runtime.Scheme
 
+	// WebhookInstaller installs ValidatingWebhookConfigurations in provider
+	// workspaces. Nil if webhook installation is not configured.
+	WebhookInstaller *WebhookInstaller
+
 	mu             sync.Mutex
 	exportManagers map[string]*exportManagerState // keyed by "path/name"
 }
@@ -80,6 +84,13 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 	if err := r.ensureWatcher(ctx, &rule); err != nil {
 		logger.Error(err, "failed to ensure watcher")
 		return ctrl.Result{}, err
+	}
+
+	if r.WebhookInstaller != nil {
+		if err := r.WebhookInstaller.EnsureWebhooks(ctx, &rule); err != nil {
+			logger.Error(err, "failed to ensure webhooks")
+			return ctrl.Result{}, err
+		}
 	}
 
 	return ctrl.Result{}, nil
