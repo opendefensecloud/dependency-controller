@@ -2,11 +2,21 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
+	"net/http"
 	"time"
 
-	admissionv1 "k8s.io/api/admission/v1"
+	admissionregistrationv1 "k8s.io/api/admission/v1"
+	registrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,6 +27,7 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"sigs.k8s.io/yaml"
 
@@ -24,7 +35,6 @@ import (
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	"github.com/kcp-dev/sdk/apis/core"
-	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	clusterclient "github.com/kcp-dev/multicluster-provider/client"
@@ -36,10 +46,16 @@ import (
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 	"go.opendefense.cloud/dependency-controller/internal/controller"
-	"go.opendefense.cloud/dependency-controller/internal/webhook"
+	depwebhook "go.opendefense.cloud/dependency-controller/internal/webhook"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+)
+
+// Keep these to suppress unused import warnings from the test framework.
+var (
+	_ = admissionregistrationv1.SchemeGroupVersion
+	_ = registrationv1.SchemeGroupVersion
 )
 
 var _ = Describe("Dependency Controller", Ordered, func() {
@@ -47,15 +63,12 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		ctx    context.Context
 		cancel context.CancelFunc
 
-		cli              clusterclient.ClusterClient
-		depCtrlPath      logicalcluster.Path
-		networkProvPath  logicalcluster.Path
-		computeProvPath  logicalcluster.Path
-		consumer1Path    logicalcluster.Path
-		consumer1WS      *tenancyv1alpha1.Workspace
-		consumer2Path    logicalcluster.Path
-
-		deletionValidator *webhook.DeletionValidator
+		cli             clusterclient.ClusterClient
+		depCtrlPath     logicalcluster.Path
+		networkProvPath logicalcluster.Path
+		computeProvPath logicalcluster.Path
+		consumer1Path   logicalcluster.Path
+		consumer2Path   logicalcluster.Path
 	)
 
 	BeforeAll(func() {
@@ -70,7 +83,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		_, depCtrlPath = envtest.NewWorkspaceFixture(GinkgoT(), cli, core.RootCluster.Path(), envtest.WithNamePrefix("dep-ctrl"))
 		_, networkProvPath = envtest.NewWorkspaceFixture(GinkgoT(), cli, core.RootCluster.Path(), envtest.WithNamePrefix("network-provider"))
 		_, computeProvPath = envtest.NewWorkspaceFixture(GinkgoT(), cli, core.RootCluster.Path(), envtest.WithNamePrefix("compute-provider"))
-		consumer1WS, consumer1Path = envtest.NewWorkspaceFixture(GinkgoT(), cli, core.RootCluster.Path(), envtest.WithNamePrefix("consumer1"))
+		_, consumer1Path = envtest.NewWorkspaceFixture(GinkgoT(), cli, core.RootCluster.Path(), envtest.WithNamePrefix("consumer1"))
 		_, consumer2Path = envtest.NewWorkspaceFixture(GinkgoT(), cli, core.RootCluster.Path(), envtest.WithNamePrefix("consumer2"))
 
 		// === Dep-Ctrl Workspace: APIExport for DependencyRule + Dependency ===
@@ -267,8 +280,24 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			Complete(mcreconcile.Func(ruleReconciler.Reconcile))
 		Expect(err).NotTo(HaveOccurred())
 
-		// Create the deletion validator using the dep-ctrl manager.
-		deletionValidator = &webhook.DeletionValidator{Manager: mgr}
+		// === Set up the webhook server ===
+
+		caBundle, webhookURL := startWebhookServer(ctx, &depwebhook.DeletionValidator{Manager: mgr})
+
+		// Register ValidatingWebhookConfiguration in all provider workspaces.
+		// kcp's admission plugin resolves the APIBinding to find the source workspace,
+		// then dispatches the admission request to webhooks configured there.
+		for _, providerWS := range []struct {
+			path     logicalcluster.Path
+			group    string
+			resource string
+			version  string
+		}{
+			{networkProvPath, "network.test.io", "vpcs", "v1"},
+			{computeProvPath, "compute.test.io", "virtualmachines", "v1"},
+		} {
+			installWebhook(ctx, cli, providerWS.path, caBundle, webhookURL, providerWS.group, providerWS.resource, providerWS.version)
+		}
 
 		// Start the manager.
 		go func() {
@@ -344,7 +373,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		})
 
 		It("should block VPC deletion via webhook when a Dependency exists", func() {
-			By("verifying a Dependency object exists in consumer1 (from earlier test)")
+			By("verifying a Dependency object exists in consumer1")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
 				var deps v1alpha1.DependencyList
 				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
@@ -358,16 +387,11 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				return false, fmt.Sprintf("no Dependency for my-vpc, got %d items", len(deps.Items))
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for Dependency to exist")
 
-			By("invoking the deletion webhook for the VPC")
-			resp := deletionValidator.Handle(ctx, deleteAdmissionRequest(
-				consumer1WS.Spec.Cluster,
-				"network.test.io", "v1", "vpcs",
-				"my-vpc", "default",
-			))
-			Expect(resp.Allowed).To(BeFalse(), "expected deletion to be denied")
-			Expect(resp.Result).NotTo(BeNil())
-			Expect(resp.Result.Message).To(ContainSubstring("my-vpc"))
-			Expect(resp.Result.Message).To(ContainSubstring("my-vm"))
+			By("attempting to delete the VPC in consumer1 — should be blocked by webhook")
+			vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
+			err := cli.Cluster(consumer1Path).Delete(ctx, vpc)
+			Expect(err).To(HaveOccurred(), "expected deletion to be denied by webhook")
+			Expect(err.Error()).To(ContainSubstring("my-vpc"))
 		})
 
 		It("should clean up Dependencies when the dependent VM is deleted", func() {
@@ -405,16 +429,124 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				return true, ""
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for cleanup")
 
-			By("invoking the deletion webhook for the VPC")
-			resp := deletionValidator.Handle(ctx, deleteAdmissionRequest(
-				consumer1WS.Spec.Cluster,
-				"network.test.io", "v1", "vpcs",
-				"my-vpc", "default",
-			))
-			Expect(resp.Allowed).To(BeTrue(), "expected deletion to be allowed after cleanup")
+			By("deleting the VPC in consumer1 — should succeed now")
+			vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
+			Expect(cli.Cluster(consumer1Path).Delete(ctx, vpc)).To(Succeed())
 		})
 	})
 })
+
+// startWebhookServer generates a self-signed CA and server cert, starts an HTTPS
+// server on a random port serving the given handler at /validate-deletion,
+// and returns the PEM-encoded CA bundle and the webhook URL.
+func startWebhookServer(ctx context.Context, handler admission.Handler) (caBundle []byte, url string) {
+	// Generate self-signed CA.
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(1 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	caCert, err := x509.ParseCertificate(caCertDER)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCertDER})
+
+	// Generate server cert signed by CA.
+	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+	serverTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(1 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+		DNSNames:     []string{"localhost"},
+	}
+	serverCertDER, err := x509.CreateCertificate(rand.Reader, serverTemplate, caCert, &serverKey.PublicKey, caKey)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+	tlsCert := tls.Certificate{
+		Certificate: [][]byte{serverCertDER},
+		PrivateKey:  serverKey,
+	}
+
+	// Start listener on a random port.
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+	})
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	// Wire up the admission handler.
+	mux := http.NewServeMux()
+	mux.Handle("/validate-deletion", &webhook.Admission{Handler: handler})
+
+	server := &http.Server{Handler: mux}
+	go func() {
+		defer GinkgoRecover()
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			Fail(fmt.Sprintf("webhook server failed: %v", err))
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		server.Close() //nolint:errcheck
+	}()
+
+	return caPEM, fmt.Sprintf("https://127.0.0.1:%d/validate-deletion", port)
+}
+
+// installWebhook creates a ValidatingWebhookConfiguration in the given provider
+// workspace. kcp's admission plugin dispatches webhook calls to the workspace
+// that owns the APIExport for the resource being modified.
+func installWebhook(
+	ctx context.Context,
+	cli clusterclient.ClusterClient,
+	wsPath logicalcluster.Path,
+	caBundle []byte,
+	webhookURL string,
+	group, resource, version string,
+) {
+	failPolicy := registrationv1.Fail
+	sideEffects := registrationv1.SideEffectClassNone
+	whCfg := &registrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("dep-ctrl-%s", resource),
+		},
+		Webhooks: []registrationv1.ValidatingWebhook{{
+			Name:                    fmt.Sprintf("dep-ctrl.%s.%s", resource, group),
+			AdmissionReviewVersions: []string{"v1"},
+			ClientConfig: registrationv1.WebhookClientConfig{
+				URL:      &webhookURL,
+				CABundle: caBundle,
+			},
+			FailurePolicy: &failPolicy,
+			SideEffects:   &sideEffects,
+			Rules: []registrationv1.RuleWithOperations{{
+				Operations: []registrationv1.OperationType{registrationv1.Delete},
+				Rule: registrationv1.Rule{
+					APIGroups:   []string{group},
+					APIVersions: []string{version},
+					Resources:   []string{resource},
+				},
+			}},
+		}},
+	}
+	ExpectWithOffset(1, cli.Cluster(wsPath).Create(ctx, whCfg)).To(Succeed())
+}
 
 // createBinding creates an APIBinding in the given workspace.
 func createBinding(ctx context.Context, cli clusterclient.ClusterClient, wsPath logicalcluster.Path, exportName string, exportPath logicalcluster.Path) {
@@ -461,34 +593,4 @@ func toYAML(obj interface{}) string {
 		return fmt.Sprintf("<marshal error: %v>", err)
 	}
 	return string(data)
-}
-
-// deleteAdmissionRequest builds an admission.Request simulating a DELETE of the
-// given resource, with the kcp.io/cluster annotation set so the webhook can
-// resolve the correct cluster.
-func deleteAdmissionRequest(clusterName, group, version, resource, name, namespace string) admission.Request {
-	oldObj := &unstructured.Unstructured{}
-	oldObj.SetGroupVersionKind(runtimeschema.GroupVersionKind{Group: group, Version: version, Kind: resource})
-	oldObj.SetName(name)
-	oldObj.SetNamespace(namespace)
-	oldObj.SetAnnotations(map[string]string{
-		logicalcluster.AnnotationKey: clusterName,
-	})
-
-	raw, err := json.Marshal(oldObj.Object)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
-	return admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: admissionv1.Delete,
-			Resource: metav1.GroupVersionResource{
-				Group:    group,
-				Version:  version,
-				Resource: resource,
-			},
-			Name:      name,
-			Namespace: namespace,
-			OldObject: runtime.RawExtension{Raw: raw},
-		},
-	}
 }
