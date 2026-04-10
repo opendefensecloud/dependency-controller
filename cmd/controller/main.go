@@ -1,0 +1,96 @@
+package main
+
+import (
+	"flag"
+	"os"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
+
+	"github.com/kcp-dev/multicluster-provider/apiexport"
+
+	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
+
+	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
+	"go.opendefense.cloud/dependency-controller/internal/controller"
+)
+
+var scheme = runtime.NewScheme()
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	utilruntime.Must(apisv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(tenancyv1alpha1.AddToScheme(scheme))
+}
+
+func main() {
+	var apiExportName string
+	var kcpBaseHost string
+	flag.StringVar(&apiExportName, "api-export-name", "dependencies.opendefense.cloud", "Name of the dependency-controller's APIExport")
+	flag.StringVar(&kcpBaseHost, "kcp-base-host", "", "Base kcp host URL (without workspace path). If empty, derived from kubeconfig.")
+
+	opts := zap.Options{Development: true}
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	setupLog := ctrl.Log.WithName("setup")
+
+	cfg := ctrl.GetConfigOrDie()
+
+	// Derive base config (root kcp URL without workspace path).
+	baseCfg := rest.CopyConfig(cfg)
+	if kcpBaseHost != "" {
+		baseCfg.Host = kcpBaseHost
+	}
+
+	// Create apiexport provider for the dependency-controller's own APIExport.
+	depCtrlProvider, err := apiexport.New(cfg, apiExportName, apiexport.Options{
+		Scheme: scheme,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create apiexport provider")
+		os.Exit(1)
+	}
+
+	mgr, err := mcmanager.New(cfg, depCtrlProvider, manager.Options{
+		Scheme: scheme,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create manager")
+		os.Exit(1)
+	}
+
+	// Register the multicluster DependencyRule reconciler.
+	reconciler := controller.NewDependencyRuleReconciler(mgr, baseCfg, scheme)
+
+	if err := mcbuilder.ControllerManagedBy(mgr).
+		Named("dependencyrule").
+		For(&v1alpha1.DependencyRule{}).
+		Complete(mcreconcile.Func(reconciler.Reconcile)); err != nil {
+		setupLog.Error(err, "unable to create DependencyRule controller")
+		os.Exit(1)
+	}
+
+	// TODO: Register multicluster-aware webhook once admission routing is implemented.
+
+	setupLog.Info("starting manager")
+
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		setupLog.Error(err, "manager failed")
+		os.Exit(1)
+	}
+}
