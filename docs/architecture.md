@@ -242,6 +242,7 @@ metadata:
   namespace: default
   labels:
     dependencies.opendefense.cloud/rule: vm-dependencies
+    dependencies.opendefense.cloud/rule-cluster: 2hx4p3vhfj9ac
     dependencies.opendefense.cloud/dependent-name: my-vm
 spec:
   dependent:
@@ -249,13 +250,11 @@ spec:
     version: v1
     resource: virtualmachines
     name: my-vm
-    namespace: default
   dependency:
     group: network.test.io
     version: v1
     resource: vpcs
     name: my-vpc
-    namespace: default
   ruleRef:
     name: vm-dependencies
     cluster: 2hx4p3vhfj9ac  # logical cluster name of the compute-provider workspace
@@ -306,3 +305,38 @@ Webhook in network-provider workspace:
 Deleting one rule removes only its contributions. The webhook is updated to
 reflect the remaining rules. When the last rule for a workspace is deleted, the
 webhook is removed entirely.
+
+## Force-Deleting Protected Resources
+
+If the normal dependency lifecycle has broken down (e.g., stale Dependency
+markers, crashed controller, orphaned Dependencies), operators can bypass
+deletion protection by annotating the resource:
+
+```sh
+kubectl annotate vpc my-vpc dependencies.opendefense.cloud/skip-protection=true
+kubectl delete vpc my-vpc
+```
+
+The webhook checks for this annotation and allows deletion regardless of
+active Dependencies.
+
+## Known Limitations
+
+### Circular dependencies
+
+The controller does not detect circular dependency chains. If two
+DependencyRules create a cycle (e.g., rule A declares VM depends on VPC and
+rule B declares VPC depends on VM), neither resource can be deleted through
+normal means. Operators must use the `skip-protection` annotation to break
+the cycle.
+
+### Eventual consistency gap on creation
+
+Between the moment a dependent resource is created (e.g., a VM referencing a
+VPC) and the moment the controller reconciles it (creating the Dependency
+marker), the dependency resource can be deleted without the webhook blocking
+it. This window is typically sub-second but is inherent to the asynchronous
+reconciliation model. The Dependency objects act as a pre-computed index that
+makes webhook decisions fast; doing synchronous lookups in the admission path
+would require the webhook to hold references to every dynamic APIExport
+manager and would add significant latency to every DELETE request.

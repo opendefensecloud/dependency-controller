@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -35,6 +34,12 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		return admission.Allowed("")
 	}
 
+	// Allow deletion if the resource has the skip-protection annotation.
+	if hasSkipProtection(req) {
+		logger.Info("skip-protection annotation present, allowing deletion")
+		return admission.Allowed("skip-protection annotation present")
+	}
+
 	// Extract the logical cluster name from the OldObject's kcp.io/cluster annotation.
 	clusterName, err := clusterFromRequest(req)
 	if err != nil {
@@ -49,9 +54,11 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 	}
 	c := cluster.GetClient()
 
-	// List all Dependency objects in the same namespace that reference this resource.
+	// List all Dependency objects across all namespaces in this workspace.
+	// We don't filter by namespace because the dependent and dependency may
+	// be in different namespaces.
 	var deps v1alpha1.DependencyList
-	if err := c.List(ctx, &deps, client.InNamespace(req.Namespace)); err != nil {
+	if err := c.List(ctx, &deps); err != nil {
 		logger.Error(err, "failed to list Dependency objects")
 		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("failed to check dependencies: %w", err))
 	}
@@ -74,6 +81,28 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 	}
 
 	return admission.Allowed("")
+}
+
+// hasSkipProtection checks if the resource being deleted has the
+// dependencies.opendefense.cloud/skip-protection annotation set to "true".
+// This provides an escape hatch for operators to force-delete resources
+// when the normal dependency lifecycle has broken down.
+func hasSkipProtection(req admission.Request) bool {
+	raw := req.OldObject.Raw
+	if len(raw) == 0 {
+		raw = req.Object.Raw
+	}
+	if len(raw) == 0 {
+		return false
+	}
+
+	obj := &unstructured.Unstructured{}
+	if err := json.Unmarshal(raw, &obj.Object); err != nil {
+		return false
+	}
+
+	annotations := obj.GetAnnotations()
+	return annotations["dependencies.opendefense.cloud/skip-protection"] == "true"
 }
 
 // clusterFromRequest extracts the logical cluster name from the admission

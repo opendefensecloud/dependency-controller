@@ -108,18 +108,16 @@ func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Req
 			},
 			Spec: v1alpha1.DependencySpec{
 				Dependent: v1alpha1.ObjectReference{
-					Group:     r.Dependent.Group,
-					Version:   r.Dependent.Version,
-					Resource:  r.Dependent.Resource,
-					Name:      req.Name,
-					Namespace: req.Namespace,
+					Group:    r.Dependent.Group,
+					Version:  r.Dependent.Version,
+					Resource: r.Dependent.Resource,
+					Name:     req.Name,
 				},
 				Dependency: v1alpha1.ObjectReference{
-					Group:     dep.Group,
-					Version:   dep.Version,
-					Resource:  dep.Resource,
-					Name:      refName,
-					Namespace: req.Namespace,
+					Group:    dep.Group,
+					Version:  dep.Version,
+					Resource: dep.Resource,
+					Name:     refName,
 				},
 				RuleRef: v1alpha1.RuleReference{
 					Name:    r.RuleName,

@@ -122,6 +122,9 @@ type RuleReference struct {
 }
 
 // ObjectReference identifies a specific resource instance.
+// Namespace is not included because the Dependency object itself is namespace-scoped
+// and lives in the same namespace as the dependent resource. The webhook lists
+// Dependencies across all namespaces to correctly handle cross-namespace references.
 type ObjectReference struct {
 	// Group is the API group of the resource.
 	Group string `json:"group"`
@@ -134,9 +137,6 @@ type ObjectReference struct {
 
 	// Name is the name of the resource instance.
 	Name string `json:"name"`
-
-	// Namespace is the namespace of the resource (empty for cluster-scoped resources).
-	Namespace string `json:"namespace,omitempty"`
 }
 
 // +kubebuilder:object:root=true

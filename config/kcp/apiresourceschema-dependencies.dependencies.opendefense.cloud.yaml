@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260410-f732739.dependencies.dependencies.opendefense.cloud
+  name: v260410-7199b0b.dependencies.dependencies.opendefense.cloud
 spec:
   group: dependencies.opendefense.cloud
   names:
@@ -48,10 +48,6 @@ spec:
                 name:
                   description: Name is the name of the resource instance.
                   type: string
-                namespace:
-                  description: Namespace is the namespace of the resource (empty for
-                    cluster-scoped resources).
-                  type: string
                 resource:
                   description: Resource is the plural resource name.
                   type: string
@@ -72,10 +68,6 @@ spec:
                   type: string
                 name:
                   description: Name is the name of the resource instance.
-                  type: string
-                namespace:
-                  description: Namespace is the namespace of the resource (empty for
-                    cluster-scoped resources).
                   type: string
                 resource:
                   description: Resource is the plural resource name.
