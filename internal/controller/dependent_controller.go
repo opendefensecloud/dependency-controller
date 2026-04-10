@@ -31,6 +31,7 @@ type DependentReconciler struct {
 	DepCtrlManager   mcmanager.Manager
 	DependentManager mcmanager.Manager
 	RuleName         string
+	RuleCluster      string
 	Dependent        schema.GroupVersionResource
 	DependentKind    schema.GroupVersionKind
 	Dependencies     []v1alpha1.DependencyTarget
@@ -45,6 +46,7 @@ type DependentReconciler struct {
 func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues(
 		"rule", r.RuleName,
+		"ruleCluster", r.RuleCluster,
 		"dependent", req.Name,
 		"namespace", req.Namespace,
 		"cluster", req.ClusterName,
@@ -92,17 +94,17 @@ func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Req
 			continue
 		}
 
-		depObjName := dependencyName(r.RuleName, req.Name, dep.Resource, refName)
+		depObjName := dependencyName(r.RuleCluster, r.RuleName, req.Name, dep.Resource, refName)
 		desiredDeps = append(desiredDeps, depObjName)
+
+		labels := r.ruleLabels()
+		labels["dependencies.opendefense.cloud/dependent-name"] = req.Name
 
 		dependency := &v1alpha1.Dependency{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      depObjName,
 				Namespace: req.Namespace,
-				Labels: map[string]string{
-					"dependencies.opendefense.cloud/rule":           r.RuleName,
-					"dependencies.opendefense.cloud/dependent-name": req.Name,
-				},
+				Labels:    labels,
 			},
 			Spec: v1alpha1.DependencySpec{
 				Dependent: v1alpha1.ObjectReference{
@@ -119,7 +121,10 @@ func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Req
 					Name:      refName,
 					Namespace: req.Namespace,
 				},
-				RuleName: r.RuleName,
+				RuleRef: v1alpha1.RuleReference{
+					Name:    r.RuleName,
+					Cluster: r.RuleCluster,
+				},
 			},
 		}
 
@@ -156,10 +161,20 @@ func (r *DependentReconciler) trackCluster(clusterName string) {
 	r.knownClusters[clusterName] = struct{}{}
 }
 
+// ruleLabels returns the label set that uniquely identifies Dependencies
+// created by this rule. Uses separate labels for rule name and cluster to
+// avoid Kubernetes label value constraints (63 chars, no slashes).
+func (r *DependentReconciler) ruleLabels() map[string]string {
+	return map[string]string{
+		"dependencies.opendefense.cloud/rule":         r.RuleName,
+		"dependencies.opendefense.cloud/rule-cluster": r.RuleCluster,
+	}
+}
+
 // CleanupAll deletes all Dependency objects created by this rule across all
 // clusters the reconciler has seen. Called when the owning DependencyRule is deleted.
 func (r *DependentReconciler) CleanupAll(ctx context.Context) error {
-	logger := log.FromContext(ctx).WithValues("rule", r.RuleName)
+	logger := log.FromContext(ctx).WithValues("rule", r.RuleName, "ruleCluster", r.RuleCluster)
 
 	r.mu.Lock()
 	clusters := make([]string, 0, len(r.knownClusters))
@@ -182,9 +197,7 @@ func (r *DependentReconciler) CleanupAll(ctx context.Context) error {
 		// namespace-scoped and DeleteAllOf without a namespace may only target the
 		// default namespace.
 		var deps v1alpha1.DependencyList
-		if err := c.List(ctx, &deps, client.MatchingLabels{
-			"dependencies.opendefense.cloud/rule": r.RuleName,
-		}); err != nil {
+		if err := c.List(ctx, &deps, client.MatchingLabels(r.ruleLabels())); err != nil {
 			errs = append(errs, fmt.Errorf("listing in cluster %s: %w", clusterName, err))
 			continue
 		}
@@ -205,12 +218,11 @@ func (r *DependentReconciler) CleanupAll(ctx context.Context) error {
 
 // cleanupDependencies removes all Dependency objects created by this rule for a specific dependent.
 func (r *DependentReconciler) cleanupDependencies(ctx context.Context, c client.Client, dependent types.NamespacedName) error {
+	labels := r.ruleLabels()
+	labels["dependencies.opendefense.cloud/dependent-name"] = dependent.Name
 	return c.DeleteAllOf(ctx, &v1alpha1.Dependency{},
 		client.InNamespace(dependent.Namespace),
-		client.MatchingLabels{
-			"dependencies.opendefense.cloud/rule":           r.RuleName,
-			"dependencies.opendefense.cloud/dependent-name": dependent.Name,
-		},
+		client.MatchingLabels(labels),
 	)
 }
 
@@ -222,12 +234,11 @@ func (r *DependentReconciler) cleanupStaleDependencies(
 	desiredNames []string,
 ) error {
 	var existing v1alpha1.DependencyList
+	labels := r.ruleLabels()
+	labels["dependencies.opendefense.cloud/dependent-name"] = dependent.Name
 	if err := c.List(ctx, &existing,
 		client.InNamespace(dependent.Namespace),
-		client.MatchingLabels{
-			"dependencies.opendefense.cloud/rule":           r.RuleName,
-			"dependencies.opendefense.cloud/dependent-name": dependent.Name,
-		},
+		client.MatchingLabels(labels),
 	); err != nil {
 		return fmt.Errorf("listing existing dependencies: %w", err)
 	}
@@ -248,8 +259,10 @@ func (r *DependentReconciler) cleanupStaleDependencies(
 }
 
 // dependencyName generates a deterministic name for a Dependency object.
-func dependencyName(ruleName, dependentName, depResource, depName string) string {
-	name := fmt.Sprintf("%s--%s--%s.%s", ruleName, dependentName, depResource, depName)
+// The ruleCluster is included to avoid collisions when different workspaces
+// have rules with the same name.
+func dependencyName(ruleCluster, ruleName, dependentName, depResource, depName string) string {
+	name := fmt.Sprintf("%s.%s--%s--%s.%s", ruleCluster, ruleName, dependentName, depResource, depName)
 	name = strings.ReplaceAll(name, "/", "-")
 	if len(name) > 253 {
 		name = name[:253]

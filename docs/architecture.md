@@ -256,7 +256,9 @@ spec:
     resource: vpcs
     name: my-vpc
     namespace: default
-  ruleName: vm-dependencies
+  ruleRef:
+    name: vm-dependencies
+    cluster: 2hx4p3vhfj9ac  # logical cluster name of the compute-provider workspace
 ```
 
 ## Webhook Dispatch Flow

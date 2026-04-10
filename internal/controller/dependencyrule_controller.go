@@ -74,22 +74,24 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 		return ctrl.Result{}, err
 	}
 
+	ruleStateKey := ruleStateKey(req.ClusterName, req.Name)
+
 	var rule v1alpha1.DependencyRule
 	if err := cl.GetClient().Get(ctx, client.ObjectKey{Name: req.Name}, &rule); err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			logger.Info("DependencyRule deleted")
-			return ctrl.Result{}, r.handleDeletion(ctx, req.Name)
+			return ctrl.Result{}, r.handleDeletion(ctx, ruleStateKey, req.Name)
 		}
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureWatcher(ctx, &rule); err != nil {
+	if err := r.ensureWatcher(ctx, ruleStateKey, req.ClusterName, &rule); err != nil {
 		logger.Error(err, "failed to ensure watcher")
 		return ctrl.Result{}, err
 	}
 
 	if r.WebhookInstaller != nil {
-		if err := r.WebhookInstaller.EnsureWebhooks(ctx, &rule); err != nil {
+		if err := r.WebhookInstaller.EnsureWebhooks(ctx, ruleStateKey, &rule); err != nil {
 			logger.Error(err, "failed to ensure webhooks")
 			return ctrl.Result{}, err
 		}
@@ -101,11 +103,11 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 // ensureWatcher starts a multicluster dependent resource watcher for the given rule
 // if one isn't already running. Each rule gets its own mcmanager so that it can
 // be stopped independently when the rule is deleted.
-func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, rule *v1alpha1.DependencyRule) error {
+func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, key, clusterName string, rule *v1alpha1.DependencyRule) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if state, exists := r.ruleState[rule.Name]; exists {
+	if state, exists := r.ruleState[key]; exists {
 		// Update dependencies in case the rule spec changed.
 		state.reconciler.Dependencies = rule.Spec.Dependencies
 		return nil
@@ -134,6 +136,7 @@ func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, rule *v1al
 		DepCtrlManager:   r.DepCtrlManager,
 		DependentManager: mgr,
 		RuleName:         rule.Name,
+		RuleCluster:      clusterName,
 		Dependent:        gvr,
 		DependentKind:    gvk,
 		Dependencies:     rule.Spec.Dependencies,
@@ -143,14 +146,14 @@ func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, rule *v1al
 	watchObj.SetGroupVersionKind(gvk)
 
 	if err := mcbuilder.ControllerManagedBy(mgr).
-		Named(fmt.Sprintf("dependent-%s", rule.Name)).
+		Named(fmt.Sprintf("dependent-%s", key)).
 		For(watchObj).
 		Complete(mcreconcile.Func(reconciler.Reconcile)); err != nil {
 		mgrCancel()
 		return fmt.Errorf("registering dependent controller for rule %s: %w", rule.Name, err)
 	}
 
-	r.ruleState[rule.Name] = &ruleManagerState{
+	r.ruleState[key] = &ruleManagerState{
 		manager:    mgr,
 		reconciler: reconciler,
 		cancel:     mgrCancel,
@@ -158,25 +161,30 @@ func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, rule *v1al
 	return nil
 }
 
+// ruleStateKey returns a qualified key combining the cluster and rule name.
+func ruleStateKey(clusterName, ruleName string) string {
+	return clusterName + "/" + ruleName
+}
+
 // handleDeletion cleans up all resources associated with a deleted DependencyRule:
 // Dependencies are deleted across all known clusters, the dynamic manager is stopped
 // (which tears down the watch and controller), and webhook rules are removed.
-func (r *DependencyRuleReconciler) handleDeletion(ctx context.Context, ruleName string) error {
+func (r *DependencyRuleReconciler) handleDeletion(ctx context.Context, key, ruleName string) error {
 	logger := log.FromContext(ctx).WithValues("rule", ruleName)
 
 	if r.WebhookInstaller != nil {
-		if err := r.WebhookInstaller.RemoveWebhooks(ctx, ruleName); err != nil {
+		if err := r.WebhookInstaller.RemoveWebhooks(ctx, key); err != nil {
 			return fmt.Errorf("removing webhooks for rule %s: %w", ruleName, err)
 		}
 	}
 
 	r.mu.Lock()
-	state, exists := r.ruleState[ruleName]
+	state, exists := r.ruleState[key]
 	if !exists {
 		r.mu.Unlock()
 		return nil
 	}
-	delete(r.ruleState, ruleName)
+	delete(r.ruleState, key)
 	r.mu.Unlock()
 
 	// Actively clean up all Dependencies created by this rule across all

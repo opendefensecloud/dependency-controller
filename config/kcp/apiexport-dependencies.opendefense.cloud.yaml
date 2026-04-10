@@ -6,7 +6,7 @@ spec:
   resources:
   - group: dependencies.opendefense.cloud
     name: dependencies
-    schema: v260410-d7832fa.dependencies.dependencies.opendefense.cloud
+    schema: v260410-f732739.dependencies.dependencies.opendefense.cloud
     storage:
       crd: {}
   - group: dependencies.opendefense.cloud

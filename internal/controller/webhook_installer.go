@@ -45,10 +45,10 @@ type WebhookInstaller struct {
 
 type ruleTarget struct {
 	Workspace string
-	Key       ruleKey
+	Key       webhookRuleKey
 }
 
-type ruleKey struct {
+type webhookRuleKey struct {
 	Group    string
 	Version  string
 	Resource string
@@ -65,7 +65,7 @@ func NewWebhookInstaller(baseCfg *rest.Config, webhookURL string, caBundle []byt
 
 // EnsureWebhooks installs or updates ValidatingWebhookConfigurations for all
 // dependency targets in the given rule.
-func (w *WebhookInstaller) EnsureWebhooks(ctx context.Context, rule *v1alpha1.DependencyRule) error {
+func (w *WebhookInstaller) EnsureWebhooks(ctx context.Context, ruleKey string, rule *v1alpha1.DependencyRule) error {
 	// Group targets by provider workspace so we do one update per workspace.
 	byWorkspace := make(map[string][]v1alpha1.DependencyTarget)
 	for _, dep := range rule.Spec.Dependencies {
@@ -74,7 +74,7 @@ func (w *WebhookInstaller) EnsureWebhooks(ctx context.Context, rule *v1alpha1.De
 	}
 
 	for wsPath, deps := range byWorkspace {
-		if err := w.ensureWebhookForWorkspace(ctx, rule.Name, wsPath, deps); err != nil {
+		if err := w.ensureWebhookForWorkspace(ctx, ruleKey, wsPath, deps); err != nil {
 			return err
 		}
 	}
@@ -121,7 +121,7 @@ func (w *WebhookInstaller) ensureWebhookForWorkspace(ctx context.Context, ruleNa
 	for _, dep := range deps {
 		t := ruleTarget{
 			Workspace: wsPath,
-			Key:       ruleKey{Group: dep.Group, Version: dep.Version, Resource: dep.Resource},
+			Key:       webhookRuleKey{Group: dep.Group, Version: dep.Version, Resource: dep.Resource},
 		}
 		if _, ok := existingSet[t]; !ok {
 			newTargets = append(newTargets, t)
@@ -202,11 +202,11 @@ func (w *WebhookInstaller) reconcileWorkspaceWebhook(ctx context.Context, wsPath
 
 // desiredRulesForWorkspace returns the deduplicated set of resource keys that
 // should be protected in the given workspace, computed from all tracked rules.
-func (w *WebhookInstaller) desiredRulesForWorkspace(wsPath string) map[ruleKey]struct{} {
+func (w *WebhookInstaller) desiredRulesForWorkspace(wsPath string) map[webhookRuleKey]struct{} {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	desired := make(map[ruleKey]struct{})
+	desired := make(map[webhookRuleKey]struct{})
 	for _, targets := range w.ruleTargets {
 		for _, t := range targets {
 			if t.Workspace == wsPath {
@@ -217,7 +217,7 @@ func (w *WebhookInstaller) desiredRulesForWorkspace(wsPath string) map[ruleKey]s
 	return desired
 }
 
-func (w *WebhookInstaller) buildRuleList(desired map[ruleKey]struct{}) []registrationv1.RuleWithOperations {
+func (w *WebhookInstaller) buildRuleList(desired map[webhookRuleKey]struct{}) []registrationv1.RuleWithOperations {
 	rules := make([]registrationv1.RuleWithOperations, 0, len(desired))
 	for key := range desired {
 		rules = append(rules, registrationv1.RuleWithOperations{

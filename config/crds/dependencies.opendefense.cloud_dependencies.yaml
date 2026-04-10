@@ -93,14 +93,25 @@ spec:
                 - resource
                 - version
                 type: object
-              ruleName:
-                description: RuleName is the name of the DependencyRule that caused
-                  this Dependency to be created.
-                type: string
+              ruleRef:
+                description: RuleRef identifies the DependencyRule that caused this
+                  Dependency to be created.
+                properties:
+                  cluster:
+                    description: Cluster is the logical cluster name of the workspace
+                      where the DependencyRule lives.
+                    type: string
+                  name:
+                    description: Name is the name of the DependencyRule.
+                    type: string
+                required:
+                - cluster
+                - name
+                type: object
             required:
             - dependency
             - dependent
-            - ruleName
+            - ruleRef
             type: object
         required:
         - spec

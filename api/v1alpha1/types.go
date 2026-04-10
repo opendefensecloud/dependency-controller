@@ -108,8 +108,17 @@ type DependencySpec struct {
 	// Dependency identifies the resource being depended upon (protected from deletion).
 	Dependency ObjectReference `json:"dependency"`
 
-	// RuleName is the name of the DependencyRule that caused this Dependency to be created.
-	RuleName string `json:"ruleName"`
+	// RuleRef identifies the DependencyRule that caused this Dependency to be created.
+	RuleRef RuleReference `json:"ruleRef"`
+}
+
+// RuleReference identifies a DependencyRule by name and the workspace (logical cluster) it lives in.
+type RuleReference struct {
+	// Name is the name of the DependencyRule.
+	Name string `json:"name"`
+
+	// Cluster is the logical cluster name of the workspace where the DependencyRule lives.
+	Cluster string `json:"cluster"`
 }
 
 // ObjectReference identifies a specific resource instance.
