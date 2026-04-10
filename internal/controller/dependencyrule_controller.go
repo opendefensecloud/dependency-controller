@@ -105,14 +105,16 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 // be stopped independently when the rule is deleted.
 func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, key, clusterName string, rule *v1alpha1.DependencyRule) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if state, exists := r.ruleState[key]; exists {
 		// Update dependencies in case the rule spec changed.
 		state.reconciler.Dependencies = rule.Spec.Dependencies
+		r.mu.Unlock()
 		return nil
 	}
+	r.mu.Unlock()
 
+	// Create the manager and controller outside the lock to avoid blocking
+	// other rule reconciliations during potentially slow operations.
 	ref := rule.Spec.Dependent.APIExportRef
 	dep := rule.Spec.Dependent
 
@@ -153,11 +155,20 @@ func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, key, clust
 		return fmt.Errorf("registering dependent controller for rule %s: %w", rule.Name, err)
 	}
 
+	// Re-lock to insert. Check again in case a concurrent reconcile raced us.
+	r.mu.Lock()
+	if _, exists := r.ruleState[key]; exists {
+		r.mu.Unlock()
+		// Another goroutine won the race — discard the manager we just created.
+		mgrCancel()
+		return nil
+	}
 	r.ruleState[key] = &ruleManagerState{
 		manager:    mgr,
 		reconciler: reconciler,
 		cancel:     mgrCancel,
 	}
+	r.mu.Unlock()
 	return nil
 }
 

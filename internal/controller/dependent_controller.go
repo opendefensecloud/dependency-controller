@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -18,7 +20,7 @@ import (
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
-	"go.opendefense.cloud/dependency-controller/internal/webhook"
+	"go.opendefense.cloud/dependency-controller/internal/fieldpath"
 )
 
 // DependentReconciler watches a specific dependent resource type (e.g., VirtualMachines)
@@ -89,7 +91,7 @@ func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Req
 	// create or update the corresponding Dependency marker object.
 	var desiredDeps []string
 	for _, dep := range r.Dependencies {
-		refName := webhook.ResolveFieldPath(obj.Object, dep.FieldRef.Path)
+		refName := fieldpath.Resolve(obj.Object, dep.FieldRef.Path)
 		if refName == "" {
 			continue
 		}
@@ -98,7 +100,7 @@ func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Req
 		desiredDeps = append(desiredDeps, depObjName)
 
 		labels := r.ruleLabels()
-		labels["dependencies.opendefense.cloud/dependent-name"] = req.Name
+		labels[LabelDependentName] = req.Name
 
 		dependency := &v1alpha1.Dependency{
 			ObjectMeta: metav1.ObjectMeta{
@@ -164,8 +166,8 @@ func (r *DependentReconciler) trackCluster(clusterName string) {
 // avoid Kubernetes label value constraints (63 chars, no slashes).
 func (r *DependentReconciler) ruleLabels() map[string]string {
 	return map[string]string{
-		"dependencies.opendefense.cloud/rule":         r.RuleName,
-		"dependencies.opendefense.cloud/rule-cluster": r.RuleCluster,
+		LabelRule:         r.RuleName,
+		LabelRuleCluster: r.RuleCluster,
 	}
 }
 
@@ -217,7 +219,7 @@ func (r *DependentReconciler) CleanupAll(ctx context.Context) error {
 // cleanupDependencies removes all Dependency objects created by this rule for a specific dependent.
 func (r *DependentReconciler) cleanupDependencies(ctx context.Context, c client.Client, dependent types.NamespacedName) error {
 	labels := r.ruleLabels()
-	labels["dependencies.opendefense.cloud/dependent-name"] = dependent.Name
+	labels[LabelDependentName] = dependent.Name
 	return c.DeleteAllOf(ctx, &v1alpha1.Dependency{},
 		client.InNamespace(dependent.Namespace),
 		client.MatchingLabels(labels),
@@ -233,7 +235,7 @@ func (r *DependentReconciler) cleanupStaleDependencies(
 ) error {
 	var existing v1alpha1.DependencyList
 	labels := r.ruleLabels()
-	labels["dependencies.opendefense.cloud/dependent-name"] = dependent.Name
+	labels[LabelDependentName] = dependent.Name
 	if err := c.List(ctx, &existing,
 		client.InNamespace(dependent.Namespace),
 		client.MatchingLabels(labels),
@@ -258,12 +260,16 @@ func (r *DependentReconciler) cleanupStaleDependencies(
 
 // dependencyName generates a deterministic name for a Dependency object.
 // The ruleCluster is included to avoid collisions when different workspaces
-// have rules with the same name.
+// have rules with the same name. If the name exceeds 253 characters, it is
+// truncated and a hash suffix is appended to prevent ambiguous collisions.
 func dependencyName(ruleCluster, ruleName, dependentName, depResource, depName string) string {
 	name := fmt.Sprintf("%s.%s--%s--%s.%s", ruleCluster, ruleName, dependentName, depResource, depName)
 	name = strings.ReplaceAll(name, "/", "-")
 	if len(name) > 253 {
-		name = name[:253]
+		h := sha256.Sum256([]byte(name))
+		suffix := hex.EncodeToString(h[:8])
+		// 253 - 1 (dash) - 16 (hash hex) = 236
+		name = name[:236] + "-" + suffix
 	}
 	return name
 }

@@ -1,10 +1,10 @@
-package webhook
+package fieldpath
 
 import "strings"
 
-// ResolveFieldPath extracts a string value from a nested map using a dot-notation path.
+// Resolve extracts a string value from a nested map using a dot-notation path.
 // Path format: ".spec.vpcRef.name" (leading dot is optional).
-func ResolveFieldPath(obj map[string]interface{}, path string) string {
+func Resolve(obj map[string]interface{}, path string) string {
 	path = strings.TrimPrefix(path, ".")
 	parts := strings.Split(path, ".")
 

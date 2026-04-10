@@ -15,6 +15,7 @@ import (
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
+	"go.opendefense.cloud/dependency-controller/internal/controller"
 )
 
 // DeletionValidator is a validating admission webhook handler that blocks
@@ -34,20 +35,28 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		return admission.Allowed("")
 	}
 
+	// Parse the object once for both skip-protection and cluster extraction.
+	obj, err := objectFromRequest(req)
+	if err != nil {
+		logger.Error(err, "failed to parse object from admission request")
+		return admission.Errored(http.StatusBadRequest, fmt.Errorf("failed to parse object: %w", err))
+	}
+
 	// Allow deletion if the resource has the skip-protection annotation.
-	if hasSkipProtection(req) {
+	if obj.GetAnnotations()[controller.AnnotationSkipProtection] == "true" {
 		logger.Info("skip-protection annotation present, allowing deletion")
 		return admission.Allowed("skip-protection annotation present")
 	}
 
-	// Extract the logical cluster name from the OldObject's kcp.io/cluster annotation.
-	clusterName, err := clusterFromRequest(req)
-	if err != nil {
+	// Extract the logical cluster name from the kcp.io/cluster annotation.
+	clusterName := logicalcluster.From(obj)
+	if clusterName.Empty() {
+		err := fmt.Errorf("object has no %s annotation", logicalcluster.AnnotationKey)
 		logger.Error(err, "failed to extract cluster from admission request")
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf("failed to extract cluster: %w", err))
+		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	cluster, err := v.Manager.GetCluster(ctx, clusterName)
+	cluster, err := v.Manager.GetCluster(ctx, clusterName.String())
 	if err != nil {
 		logger.Error(err, "failed to get cluster", "cluster", clusterName)
 		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("failed to get cluster %s: %w", clusterName, err))
@@ -83,47 +92,20 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 	return admission.Allowed("")
 }
 
-// hasSkipProtection checks if the resource being deleted has the
-// dependencies.opendefense.cloud/skip-protection annotation set to "true".
-// This provides an escape hatch for operators to force-delete resources
-// when the normal dependency lifecycle has broken down.
-func hasSkipProtection(req admission.Request) bool {
-	raw := req.OldObject.Raw
-	if len(raw) == 0 {
-		raw = req.Object.Raw
-	}
-	if len(raw) == 0 {
-		return false
-	}
-
-	obj := &unstructured.Unstructured{}
-	if err := json.Unmarshal(raw, &obj.Object); err != nil {
-		return false
-	}
-
-	annotations := obj.GetAnnotations()
-	return annotations["dependencies.opendefense.cloud/skip-protection"] == "true"
-}
-
-// clusterFromRequest extracts the logical cluster name from the admission
+// objectFromRequest extracts the unstructured object from the admission
 // request's OldObject (for DELETE) or Object (for other operations).
-func clusterFromRequest(req admission.Request) (string, error) {
+func objectFromRequest(req admission.Request) (*unstructured.Unstructured, error) {
 	raw := req.OldObject.Raw
 	if len(raw) == 0 {
 		raw = req.Object.Raw
 	}
 	if len(raw) == 0 {
-		return "", fmt.Errorf("no object or old object in admission request")
+		return nil, fmt.Errorf("no object or old object in admission request")
 	}
 
 	obj := &unstructured.Unstructured{}
 	if err := json.Unmarshal(raw, &obj.Object); err != nil {
-		return "", fmt.Errorf("unmarshaling object: %w", err)
+		return nil, fmt.Errorf("unmarshaling object: %w", err)
 	}
-
-	name := logicalcluster.From(obj)
-	if name.Empty() {
-		return "", fmt.Errorf("object has no %s annotation", logicalcluster.AnnotationKey)
-	}
-	return name.String(), nil
+	return obj, nil
 }
