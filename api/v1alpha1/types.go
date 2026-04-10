@@ -5,6 +5,7 @@ import (
 )
 
 // +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster
 
 // DependencyRule declares how a dependent resource type references other resource types.
 // Created by API providers alongside their APIExport.

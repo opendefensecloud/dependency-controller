@@ -1,0 +1,11 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIExport
+metadata:
+  name: compute.test.io
+spec:
+  resources:
+    - group: compute.test.io
+      name: virtualmachines
+      schema: v1.virtualmachines.compute.test.io
+      storage:
+        crd: {}

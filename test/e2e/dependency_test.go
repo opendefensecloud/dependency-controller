@@ -13,14 +13,16 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
+	registrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	runtimeschema "k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -80,112 +82,25 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 
 		// === Dep-Ctrl Workspace: APIExport for DependencyRule + Dependency ===
 
-		depRuleSchema := &apisv1alpha1.APIResourceSchema{
-			ObjectMeta: metav1.ObjectMeta{Name: "v1alpha1.dependencyrules.dependencies.opendefense.cloud"},
-			Spec: apisv1alpha1.APIResourceSchemaSpec{
-				Group: "dependencies.opendefense.cloud",
-				Names: apiextensionsv1.CustomResourceDefinitionNames{
-					Kind: "DependencyRule", ListKind: "DependencyRuleList", Plural: "dependencyrules", Singular: "dependencyrule",
-				},
-				Scope: apiextensionsv1.ClusterScoped,
-				Versions: []apisv1alpha1.APIResourceVersion{{
-					Name: "v1alpha1", Storage: true, Served: true,
-					Schema: runtime.RawExtension{
-						Raw: []byte(`{"type":"object","properties":{"spec":{"type":"object","properties":{"dependent":{"type":"object","properties":{"apiExportRef":{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"}}},"group":{"type":"string"},"version":{"type":"string"},"kind":{"type":"string"},"resource":{"type":"string"}}},"dependencies":{"type":"array","items":{"type":"object","properties":{"apiExportRef":{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"}}},"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string"},"fieldRef":{"type":"object","properties":{"path":{"type":"string"}}}}}}}}}}`),
-					},
-				}},
-			},
-		}
-		Expect(cli.Cluster(depCtrlPath).Create(ctx, depRuleSchema)).To(Succeed())
-
-		depSchema := &apisv1alpha1.APIResourceSchema{
-			ObjectMeta: metav1.ObjectMeta{Name: "v1alpha1.dependencies.dependencies.opendefense.cloud"},
-			Spec: apisv1alpha1.APIResourceSchemaSpec{
-				Group: "dependencies.opendefense.cloud",
-				Names: apiextensionsv1.CustomResourceDefinitionNames{
-					Kind: "Dependency", ListKind: "DependencyList", Plural: "dependencies", Singular: "dependency",
-				},
-				Scope: apiextensionsv1.NamespaceScoped,
-				Versions: []apisv1alpha1.APIResourceVersion{{
-					Name: "v1alpha1", Storage: true, Served: true,
-					Schema: runtime.RawExtension{
-						Raw: []byte(`{"type":"object","properties":{"spec":{"type":"object","properties":{"dependent":{"type":"object","properties":{"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},"dependency":{"type":"object","properties":{"group":{"type":"string"},"version":{"type":"string"},"resource":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},"ruleName":{"type":"string"}}}}}`),
-						},
-				}},
-			},
-		}
-		Expect(cli.Cluster(depCtrlPath).Create(ctx, depSchema)).To(Succeed())
-
-		depCtrlExport := &apisv1alpha2.APIExport{
-			ObjectMeta: metav1.ObjectMeta{Name: "dependencies.opendefense.cloud"},
-			Spec: apisv1alpha2.APIExportSpec{
-				Resources: []apisv1alpha2.ResourceSchema{
-					{Name: "dependencyrules", Group: "dependencies.opendefense.cloud", Schema: depRuleSchema.Name, Storage: apisv1alpha2.ResourceSchemaStorage{CRD: &apisv1alpha2.ResourceSchemaStorageCRD{}}},
-					{Name: "dependencies", Group: "dependencies.opendefense.cloud", Schema: depSchema.Name, Storage: apisv1alpha2.ResourceSchemaStorage{CRD: &apisv1alpha2.ResourceSchemaStorageCRD{}}},
-				},
-			},
-		}
-		Expect(cli.Cluster(depCtrlPath).Create(ctx, depCtrlExport)).To(Succeed())
+		applyFixtures(ctx, cli, depCtrlPath,
+			"../../config/kcp/apiresourceschema-dependencyrules.dependencies.opendefense.cloud.yaml",
+			"../../config/kcp/apiresourceschema-dependencies.dependencies.opendefense.cloud.yaml",
+			"../../config/kcp/apiexport-dependencies.opendefense.cloud.yaml",
+		)
 
 		// === Network Provider Workspace: APIExport for VPCs ===
 
-		vpcSchema := &apisv1alpha1.APIResourceSchema{
-			ObjectMeta: metav1.ObjectMeta{Name: "v1.vpcs.network.test.io"},
-			Spec: apisv1alpha1.APIResourceSchemaSpec{
-				Group: "network.test.io",
-				Names: apiextensionsv1.CustomResourceDefinitionNames{
-					Kind: "VPC", ListKind: "VPCList", Plural: "vpcs", Singular: "vpc",
-				},
-				Scope: apiextensionsv1.NamespaceScoped,
-				Versions: []apisv1alpha1.APIResourceVersion{{
-					Name: "v1", Storage: true, Served: true,
-					Schema: runtime.RawExtension{
-						Raw: []byte(`{"type":"object","properties":{"spec":{"type":"object","properties":{"cidr":{"type":"string"}}}}}`),
-					},
-				}},
-			},
-		}
-		Expect(cli.Cluster(networkProvPath).Create(ctx, vpcSchema)).To(Succeed())
-
-		networkExport := &apisv1alpha2.APIExport{
-			ObjectMeta: metav1.ObjectMeta{Name: "network.test.io"},
-			Spec: apisv1alpha2.APIExportSpec{
-				Resources: []apisv1alpha2.ResourceSchema{
-					{Name: "vpcs", Group: "network.test.io", Schema: vpcSchema.Name, Storage: apisv1alpha2.ResourceSchemaStorage{CRD: &apisv1alpha2.ResourceSchemaStorageCRD{}}},
-				},
-			},
-		}
-		Expect(cli.Cluster(networkProvPath).Create(ctx, networkExport)).To(Succeed())
+		applyFixtures(ctx, cli, networkProvPath,
+			"../fixtures/apiresourceschema-vpcs.yaml",
+			"../fixtures/apiexport-network.test.io.yaml",
+		)
 
 		// === Compute Provider Workspace: APIExport for VMs ===
 
-		vmSchema := &apisv1alpha1.APIResourceSchema{
-			ObjectMeta: metav1.ObjectMeta{Name: "v1.virtualmachines.compute.test.io"},
-			Spec: apisv1alpha1.APIResourceSchemaSpec{
-				Group: "compute.test.io",
-				Names: apiextensionsv1.CustomResourceDefinitionNames{
-					Kind: "VirtualMachine", ListKind: "VirtualMachineList", Plural: "virtualmachines", Singular: "virtualmachine",
-				},
-				Scope: apiextensionsv1.NamespaceScoped,
-				Versions: []apisv1alpha1.APIResourceVersion{{
-					Name: "v1", Storage: true, Served: true,
-					Schema: runtime.RawExtension{
-						Raw: []byte(`{"type":"object","properties":{"spec":{"type":"object","properties":{"cpu":{"type":"integer"},"vpcRef":{"type":"object","properties":{"name":{"type":"string"}}}}}}}`),
-					},
-				}},
-			},
-		}
-		Expect(cli.Cluster(computeProvPath).Create(ctx, vmSchema)).To(Succeed())
-
-		computeExport := &apisv1alpha2.APIExport{
-			ObjectMeta: metav1.ObjectMeta{Name: "compute.test.io"},
-			Spec: apisv1alpha2.APIExportSpec{
-				Resources: []apisv1alpha2.ResourceSchema{
-					{Name: "virtualmachines", Group: "compute.test.io", Schema: vmSchema.Name, Storage: apisv1alpha2.ResourceSchemaStorage{CRD: &apisv1alpha2.ResourceSchemaStorageCRD{}}},
-				},
-			},
-		}
-		Expect(cli.Cluster(computeProvPath).Create(ctx, computeExport)).To(Succeed())
+		applyFixtures(ctx, cli, computeProvPath,
+			"../fixtures/apiresourceschema-virtualmachines.yaml",
+			"../fixtures/apiexport-compute.test.io.yaml",
+		)
 
 		// === APIBindings ===
 
@@ -421,6 +336,78 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
 			Expect(cli.Cluster(consumer1Path).Delete(ctx, vpc)).To(Succeed())
 		})
+
+		It("should clean up everything when the DependencyRule is deleted", func() {
+			By("creating a new VPC in consumer1")
+			vpc := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
+			setNestedField(vpc, "10.1.0.0/16", "spec", "cidr")
+			Expect(cli.Cluster(consumer1Path).Create(ctx, vpc)).To(Succeed())
+
+			By("creating a VM referencing the VPC")
+			vm := newUnstructured("compute.test.io", "v1", "VirtualMachine", "cleanup-vm", "default")
+			setNestedField(vm, "cleanup-vpc", "spec", "vpcRef", "name")
+			setNestedField(vm, int64(2), "spec", "cpu")
+			Expect(cli.Cluster(consumer1Path).Create(ctx, vm)).To(Succeed())
+
+			By("waiting for the Dependency to be created")
+			envtest.Eventually(GinkgoT(), func() (bool, string) {
+				var deps v1alpha1.DependencyList
+				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
+					return false, fmt.Sprintf("list: %v", err)
+				}
+				for _, d := range deps.Items {
+					if d.Spec.Dependent.Name == "cleanup-vm" && d.Spec.Dependency.Name == "cleanup-vpc" {
+						return true, ""
+					}
+				}
+				return false, fmt.Sprintf("no matching Dependency, got %d items", len(deps.Items))
+			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for Dependency")
+
+			By("verifying the webhook blocks VPC deletion")
+			err := cli.Cluster(consumer1Path).Delete(ctx, vpc.DeepCopy())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("cleanup-vpc"))
+
+			By("deleting the DependencyRule")
+			rule := &v1alpha1.DependencyRule{
+				ObjectMeta: metav1.ObjectMeta{Name: "vm-dependencies"},
+			}
+			Expect(cli.Cluster(computeProvPath).Delete(ctx, rule)).To(Succeed())
+
+			By("verifying Dependencies are proactively cleaned up in consumer1")
+			envtest.Eventually(GinkgoT(), func() (bool, string) {
+				var deps v1alpha1.DependencyList
+				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
+					return false, fmt.Sprintf("list: %v", err)
+				}
+				if len(deps.Items) > 0 {
+					return false, fmt.Sprintf("still have %d Dependencies", len(deps.Items))
+				}
+				return true, ""
+			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for Dependency cleanup")
+
+			By("verifying the webhook is removed from the network provider workspace")
+			envtest.Eventually(GinkgoT(), func() (bool, string) {
+				cfg := rest.CopyConfig(kcpConfig)
+				cfg.Host += networkProvPath.RequestPath()
+				c, err := client.New(cfg, client.Options{})
+				if err != nil {
+					return false, fmt.Sprintf("creating client: %v", err)
+				}
+				whCfg := &registrationv1.ValidatingWebhookConfiguration{}
+				err = c.Get(ctx, types.NamespacedName{Name: "dependency-controller"}, whCfg)
+				if apierrors.IsNotFound(err) {
+					return true, ""
+				}
+				if err != nil {
+					return false, fmt.Sprintf("get webhook: %v", err)
+				}
+				return false, "webhook still exists"
+			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook removal")
+
+			By("verifying VPC deletion now succeeds without webhook")
+			Expect(cli.Cluster(consumer1Path).Delete(ctx, vpc)).To(Succeed())
+		})
 	})
 })
 
@@ -555,4 +542,34 @@ func toYAML(obj interface{}) string {
 		return fmt.Sprintf("<marshal error: %v>", err)
 	}
 	return string(data)
+}
+
+// applyFixtures reads YAML files (relative to the test file directory) and
+// creates each object in the given workspace. Supports APIResourceSchema and
+// APIExport types.
+func applyFixtures(ctx context.Context, cli clusterclient.ClusterClient, wsPath logicalcluster.Path, paths ...string) {
+	for _, p := range paths {
+		raw, err := os.ReadFile(p)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "reading fixture %s", p)
+
+		// Peek at the kind to decide which type to unmarshal into.
+		var meta metav1.TypeMeta
+		ExpectWithOffset(1, yaml.Unmarshal(raw, &meta)).To(Succeed(), "parsing kind from %s", p)
+
+		var obj client.Object
+		switch meta.Kind {
+		case "APIResourceSchema":
+			o := &apisv1alpha1.APIResourceSchema{}
+			ExpectWithOffset(1, yaml.Unmarshal(raw, o)).To(Succeed(), "unmarshaling %s", p)
+			obj = o
+		case "APIExport":
+			o := &apisv1alpha2.APIExport{}
+			ExpectWithOffset(1, yaml.Unmarshal(raw, o)).To(Succeed(), "unmarshaling %s", p)
+			obj = o
+		default:
+			Fail(fmt.Sprintf("unsupported fixture kind %q in %s", meta.Kind, p))
+		}
+
+		ExpectWithOffset(1, cli.Cluster(wsPath).Create(ctx, obj)).To(Succeed(), "creating fixture %s in %s", p, wsPath)
+	}
 }

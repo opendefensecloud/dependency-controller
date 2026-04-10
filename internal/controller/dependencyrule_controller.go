@@ -41,15 +41,17 @@ type DependencyRuleReconciler struct {
 	// workspaces. Nil if webhook installation is not configured.
 	WebhookInstaller *WebhookInstaller
 
-	mu             sync.Mutex
-	exportManagers map[string]*exportManagerState // keyed by "path/name"
+	mu        sync.Mutex
+	ruleState map[string]*ruleManagerState // keyed by rule name
 }
 
-// exportManagerState tracks a dynamically created mcmanager for a specific APIExport.
-type exportManagerState struct {
-	manager        mcmanager.Manager
-	cancel         context.CancelFunc
-	activeWatchers map[string]struct{} // keyed by rule name
+// ruleManagerState tracks the dynamic manager, reconciler, and cancel function
+// for a single DependencyRule. Each rule gets its own manager so that cancelling
+// it cleanly stops the watch/informer and controller.
+type ruleManagerState struct {
+	manager    mcmanager.Manager
+	reconciler *DependentReconciler
+	cancel     context.CancelFunc
 }
 
 func NewDependencyRuleReconciler(depCtrlMgr mcmanager.Manager, baseCfg *rest.Config, scheme *runtime.Scheme) *DependencyRuleReconciler {
@@ -57,7 +59,7 @@ func NewDependencyRuleReconciler(depCtrlMgr mcmanager.Manager, baseCfg *rest.Con
 		DepCtrlManager: depCtrlMgr,
 		BaseConfig:     baseCfg,
 		Scheme:         scheme,
-		exportManagers: make(map[string]*exportManagerState),
+		ruleState:      make(map[string]*ruleManagerState),
 	}
 }
 
@@ -76,7 +78,7 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 	if err := cl.GetClient().Get(ctx, client.ObjectKey{Name: req.Name}, &rule); err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			logger.Info("DependencyRule deleted")
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, r.handleDeletion(ctx, req.Name)
 		}
 		return ctrl.Result{}, err
 	}
@@ -97,30 +99,26 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 }
 
 // ensureWatcher starts a multicluster dependent resource watcher for the given rule
-// if one isn't already running. The watcher uses a dynamic mcmanager created for
-// the APIExport referenced in the rule.
+// if one isn't already running. Each rule gets its own mcmanager so that it can
+// be stopped independently when the rule is deleted.
 func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, rule *v1alpha1.DependencyRule) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	ref := rule.Spec.Dependent.APIExportRef
-	key := ref.Path + "/" + ref.Name
-
-	state, exists := r.exportManagers[key]
-	if !exists {
-		var err error
-		state, err = r.createExportManager(ctx, ref)
-		if err != nil {
-			return fmt.Errorf("creating manager for APIExport %s: %w", key, err)
-		}
-		r.exportManagers[key] = state
-	}
-
-	if _, watched := state.activeWatchers[rule.Name]; watched {
+	if state, exists := r.ruleState[rule.Name]; exists {
+		// Update dependencies in case the rule spec changed.
+		state.reconciler.Dependencies = rule.Spec.Dependencies
 		return nil
 	}
 
+	ref := rule.Spec.Dependent.APIExportRef
 	dep := rule.Spec.Dependent
+
+	mgr, mgrCancel, err := r.createExportManager(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("creating manager for rule %s: %w", rule.Name, err)
+	}
+
 	gvr := schema.GroupVersionResource{
 		Group:    dep.Group,
 		Version:  dep.Version,
@@ -134,7 +132,7 @@ func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, rule *v1al
 
 	reconciler := &DependentReconciler{
 		DepCtrlManager:   r.DepCtrlManager,
-		DependentManager: state.manager,
+		DependentManager: mgr,
 		RuleName:         rule.Name,
 		Dependent:        gvr,
 		DependentKind:    gvk,
@@ -144,20 +142,61 @@ func (r *DependencyRuleReconciler) ensureWatcher(ctx context.Context, rule *v1al
 	watchObj := &unstructured.Unstructured{}
 	watchObj.SetGroupVersionKind(gvk)
 
-	if err := mcbuilder.ControllerManagedBy(state.manager).
+	if err := mcbuilder.ControllerManagedBy(mgr).
 		Named(fmt.Sprintf("dependent-%s", rule.Name)).
 		For(watchObj).
 		Complete(mcreconcile.Func(reconciler.Reconcile)); err != nil {
+		mgrCancel()
 		return fmt.Errorf("registering dependent controller for rule %s: %w", rule.Name, err)
 	}
 
-	state.activeWatchers[rule.Name] = struct{}{}
+	r.ruleState[rule.Name] = &ruleManagerState{
+		manager:    mgr,
+		reconciler: reconciler,
+		cancel:     mgrCancel,
+	}
+	return nil
+}
+
+// handleDeletion cleans up all resources associated with a deleted DependencyRule:
+// Dependencies are deleted across all known clusters, the dynamic manager is stopped
+// (which tears down the watch and controller), and webhook rules are removed.
+func (r *DependencyRuleReconciler) handleDeletion(ctx context.Context, ruleName string) error {
+	logger := log.FromContext(ctx).WithValues("rule", ruleName)
+
+	if r.WebhookInstaller != nil {
+		if err := r.WebhookInstaller.RemoveWebhooks(ctx, ruleName); err != nil {
+			return fmt.Errorf("removing webhooks for rule %s: %w", ruleName, err)
+		}
+	}
+
+	r.mu.Lock()
+	state, exists := r.ruleState[ruleName]
+	if !exists {
+		r.mu.Unlock()
+		return nil
+	}
+	delete(r.ruleState, ruleName)
+	r.mu.Unlock()
+
+	// Actively clean up all Dependencies created by this rule across all
+	// clusters the reconciler has seen.
+	if err := state.reconciler.CleanupAll(ctx); err != nil {
+		logger.Error(err, "failed to clean up all dependencies")
+		// Continue to stop the manager even if cleanup partially fails.
+	}
+
+	// Cancel the manager context — this stops the controller, the informer
+	// watch, and all associated goroutines.
+	logger.Info("stopping dynamic manager for deleted rule")
+	state.cancel()
+
 	return nil
 }
 
 // createExportManager creates a new apiexport provider and mcmanager for the
-// given APIExport reference.
-func (r *DependencyRuleReconciler) createExportManager(ctx context.Context, ref v1alpha1.APIExportReference) (*exportManagerState, error) {
+// given APIExport reference. Returns the manager and a cancel function.
+func (r *DependencyRuleReconciler) createExportManager(ctx context.Context, ref v1alpha1.APIExportReference) (mcmanager.Manager, context.CancelFunc, error) {
 	logger := log.FromContext(ctx).WithValues("apiExport", ref.Name, "path", ref.Path)
 
 	// Construct REST config pointing to the workspace where the APIExport lives.
@@ -168,14 +207,14 @@ func (r *DependencyRuleReconciler) createExportManager(ctx context.Context, ref 
 		Scheme: r.Scheme,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("creating apiexport provider: %w", err)
+		return nil, nil, fmt.Errorf("creating apiexport provider: %w", err)
 	}
 
 	mgr, err := mcmanager.New(cfg, provider, manager.Options{
 		Scheme: r.Scheme,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("creating multicluster manager: %w", err)
+		return nil, nil, fmt.Errorf("creating multicluster manager: %w", err)
 	}
 
 	mgrCtx, cancel := context.WithCancel(ctx)
@@ -187,9 +226,5 @@ func (r *DependencyRuleReconciler) createExportManager(ctx context.Context, ref 
 		}
 	}()
 
-	return &exportManagerState{
-		manager:        mgr,
-		cancel:         cancel,
-		activeWatchers: make(map[string]struct{}),
-	}, nil
+	return mgr, cancel, nil
 }

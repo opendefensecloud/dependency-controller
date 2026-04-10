@@ -24,6 +24,7 @@ GINKGO ?= $(LOCALBIN)/ginkgo
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 ADDLICENSE ?= $(LOCALBIN)/addlicense
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+APIGEN ?= $(LOCALBIN)/apigen
 
 KCP_VERSION ?= 0.30.0
 GINKGO_VERSION ?= $(shell go list -json -m -u github.com/onsi/ginkgo/v2 | jq -r '.Version')
@@ -49,8 +50,13 @@ clean: ## Remove build artifacts and tool binaries.
 ##@ Development
 
 .PHONY: generate
-generate: controller-gen ## Generate deepcopy methods and manifests.
+generate: controller-gen ## Generate deepcopy methods.
 	$(CONTROLLER_GEN) object paths="./api/..."
+
+.PHONY: manifests
+manifests: controller-gen apigen ## Generate CRDs and convert to kcp APIResourceSchemas + APIExport.
+	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:dir=config/crds
+	$(APIGEN) --input-dir=config/crds --output-dir=config/kcp
 
 .PHONY: fmt
 fmt: addlicense golangci-lint ## Add license headers and format code.
@@ -129,6 +135,11 @@ addlicense: $(LOCALBIN) ## Download addlicense locally if necessary.
 	@test -s $(LOCALBIN)/addlicense && grep -q $(ADDLICENSE_VERSION) $(LOCALBIN)/.addlicense-version 2>/dev/null || \
 	GOBIN=$(LOCALBIN) go install github.com/google/addlicense@$(ADDLICENSE_VERSION); \
 	echo $(ADDLICENSE_VERSION) > $(LOCALBIN)/.addlicense-version
+
+.PHONY: apigen
+apigen: $(LOCALBIN) ## Download apigen locally if necessary.
+	@test -s $(LOCALBIN)/apigen || \
+	GOBIN=$(LOCALBIN) go install github.com/kcp-dev/sdk/cmd/apigen@v$(KCP_VERSION)
 
 .PHONY: kcp
 kcp: $(LOCALBIN) ## Download kcp binary locally if necessary.

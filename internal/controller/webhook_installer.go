@@ -29,15 +29,23 @@ const webhookName = "dependency-controller"
 // provider (e.g., VPCs and FirewallRules both from the network provider).
 // The installer merges all protected group/version/resource tuples into the
 // Rules list of one webhook entry per provider workspace.
+//
+// When a DependencyRule is deleted, its contributions are removed. If no rules
+// remain for a workspace the webhook is deleted entirely.
 type WebhookInstaller struct {
 	BaseConfig *rest.Config
 	WebhookURL string
 	CABundle   []byte
 
 	mu sync.Mutex
-	// rules tracks which group/version/resource tuples have been added to
-	// the webhook in each workspace, keyed by workspace path.
-	rules map[string]map[ruleKey]struct{}
+	// ruleTargets tracks which workspace/resource tuples each DependencyRule
+	// contributes, keyed by rule name.
+	ruleTargets map[string][]ruleTarget
+}
+
+type ruleTarget struct {
+	Workspace string
+	Key       ruleKey
 }
 
 type ruleKey struct {
@@ -48,10 +56,10 @@ type ruleKey struct {
 
 func NewWebhookInstaller(baseCfg *rest.Config, webhookURL string, caBundle []byte) *WebhookInstaller {
 	return &WebhookInstaller{
-		BaseConfig: baseCfg,
-		WebhookURL: webhookURL,
-		CABundle:   caBundle,
-		rules:      make(map[string]map[ruleKey]struct{}),
+		BaseConfig:  baseCfg,
+		WebhookURL:  webhookURL,
+		CABundle:    caBundle,
+		ruleTargets: make(map[string][]ruleTarget),
 	}
 }
 
@@ -66,36 +74,78 @@ func (w *WebhookInstaller) EnsureWebhooks(ctx context.Context, rule *v1alpha1.De
 	}
 
 	for wsPath, deps := range byWorkspace {
-		if err := w.ensureWebhookForWorkspace(ctx, wsPath, deps); err != nil {
+		if err := w.ensureWebhookForWorkspace(ctx, rule.Name, wsPath, deps); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (w *WebhookInstaller) ensureWebhookForWorkspace(ctx context.Context, wsPath string, deps []v1alpha1.DependencyTarget) error {
+// RemoveWebhooks removes all webhook rules contributed by the given DependencyRule.
+// If a workspace has no remaining rules, the webhook is deleted entirely.
+func (w *WebhookInstaller) RemoveWebhooks(ctx context.Context, ruleName string) error {
 	w.mu.Lock()
-	existing := w.rules[wsPath]
-	if existing == nil {
-		existing = make(map[ruleKey]struct{})
-		w.rules[wsPath] = existing
-	}
-
-	// Check if all targets are already covered.
-	var newKeys []ruleKey
-	for _, dep := range deps {
-		key := ruleKey{Group: dep.Group, Version: dep.Version, Resource: dep.Resource}
-		if _, ok := existing[key]; !ok {
-			newKeys = append(newKeys, key)
-		}
-	}
-	if len(newKeys) == 0 {
+	targets, exists := w.ruleTargets[ruleName]
+	if !exists {
 		w.mu.Unlock()
 		return nil
 	}
+	delete(w.ruleTargets, ruleName)
+
+	// Collect affected workspaces.
+	affectedWorkspaces := make(map[string]struct{})
+	for _, t := range targets {
+		affectedWorkspaces[t.Workspace] = struct{}{}
+	}
 	w.mu.Unlock()
 
+	for wsPath := range affectedWorkspaces {
+		if err := w.reconcileWorkspaceWebhook(ctx, wsPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *WebhookInstaller) ensureWebhookForWorkspace(ctx context.Context, ruleName, wsPath string, deps []v1alpha1.DependencyTarget) error {
+	w.mu.Lock()
+
+	// Check if all targets are already tracked for this rule.
+	existing := w.ruleTargets[ruleName]
+	existingSet := make(map[ruleTarget]struct{}, len(existing))
+	for _, t := range existing {
+		existingSet[t] = struct{}{}
+	}
+
+	var newTargets []ruleTarget
+	for _, dep := range deps {
+		t := ruleTarget{
+			Workspace: wsPath,
+			Key:       ruleKey{Group: dep.Group, Version: dep.Version, Resource: dep.Resource},
+		}
+		if _, ok := existingSet[t]; !ok {
+			newTargets = append(newTargets, t)
+		}
+	}
+	if len(newTargets) == 0 {
+		w.mu.Unlock()
+		return nil
+	}
+
+	// Record the new targets.
+	w.ruleTargets[ruleName] = append(w.ruleTargets[ruleName], newTargets...)
+	w.mu.Unlock()
+
+	return w.reconcileWorkspaceWebhook(ctx, wsPath)
+}
+
+// reconcileWorkspaceWebhook computes the desired webhook rules for a workspace
+// from all tracked DependencyRules and creates, updates, or deletes the webhook.
+func (w *WebhookInstaller) reconcileWorkspaceWebhook(ctx context.Context, wsPath string) error {
 	logger := log.FromContext(ctx).WithValues("workspace", wsPath)
+
+	// Compute desired rules for this workspace across all DependencyRules.
+	desired := w.desiredRulesForWorkspace(wsPath)
 
 	cfg := rest.CopyConfig(w.BaseConfig)
 	cfg.Host += logicalcluster.NewPath(wsPath).RequestPath()
@@ -105,55 +155,88 @@ func (w *WebhookInstaller) ensureWebhookForWorkspace(ctx context.Context, wsPath
 		return fmt.Errorf("creating client for %s: %w", wsPath, err)
 	}
 
-	// Fetch the existing webhook configuration if any.
 	whCfg := &registrationv1.ValidatingWebhookConfiguration{}
 	err = c.Get(ctx, types.NamespacedName{Name: webhookName}, whCfg)
+	webhookExists := err == nil
+
 	if apierrors.IsNotFound(err) {
-		// Create a new webhook with all desired rules.
-		whCfg = w.buildWebhookConfig(wsPath, deps)
-		logger.Info("installing webhook", "rules", len(whCfg.Webhooks[0].Rules))
+		err = nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting webhook in %s: %w", wsPath, err)
+	}
+
+	if len(desired) == 0 {
+		// No rules left — delete the webhook if it exists.
+		if webhookExists {
+			logger.Info("deleting webhook, no rules remaining")
+			if err := c.Delete(ctx, whCfg); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting webhook in %s: %w", wsPath, err)
+			}
+		}
+		return nil
+	}
+
+	rules := w.buildRuleList(desired)
+
+	if !webhookExists {
+		// Create new webhook.
+		whCfg = w.buildWebhookConfig(rules)
+		logger.Info("installing webhook", "rules", len(rules))
 		if err := c.Create(ctx, whCfg); err != nil {
 			return fmt.Errorf("creating webhook in %s: %w", wsPath, err)
 		}
-	} else if err != nil {
-		return fmt.Errorf("getting webhook in %s: %w", wsPath, err)
-	} else {
-		// Merge new rules into the existing webhook.
-		if w.mergeRules(whCfg, deps) {
-			logger.Info("updating webhook with new rules", "rules", len(whCfg.Webhooks[0].Rules))
-			if err := c.Update(ctx, whCfg); err != nil {
-				return fmt.Errorf("updating webhook in %s: %w", wsPath, err)
-			}
-		}
+		return nil
 	}
 
-	// Mark all targets as installed.
-	w.mu.Lock()
-	for _, dep := range deps {
-		w.rules[wsPath][ruleKey{Group: dep.Group, Version: dep.Version, Resource: dep.Resource}] = struct{}{}
+	// Update existing webhook with the full desired rule set.
+	if len(whCfg.Webhooks) > 0 {
+		whCfg.Webhooks[0].Rules = rules
 	}
-	w.mu.Unlock()
+	logger.Info("updating webhook", "rules", len(rules))
+	if err := c.Update(ctx, whCfg); err != nil {
+		return fmt.Errorf("updating webhook in %s: %w", wsPath, err)
+	}
 	return nil
 }
 
-// buildWebhookConfig creates a new ValidatingWebhookConfiguration with rules
-// for all the given dependency targets.
-func (w *WebhookInstaller) buildWebhookConfig(wsPath string, deps []v1alpha1.DependencyTarget) *registrationv1.ValidatingWebhookConfiguration {
-	failPolicy := registrationv1.Fail
-	sideEffects := registrationv1.SideEffectClassNone
-	webhookURL := w.WebhookURL
+// desiredRulesForWorkspace returns the deduplicated set of resource keys that
+// should be protected in the given workspace, computed from all tracked rules.
+func (w *WebhookInstaller) desiredRulesForWorkspace(wsPath string) map[ruleKey]struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-	var rules []registrationv1.RuleWithOperations
-	for _, dep := range deps {
+	desired := make(map[ruleKey]struct{})
+	for _, targets := range w.ruleTargets {
+		for _, t := range targets {
+			if t.Workspace == wsPath {
+				desired[t.Key] = struct{}{}
+			}
+		}
+	}
+	return desired
+}
+
+func (w *WebhookInstaller) buildRuleList(desired map[ruleKey]struct{}) []registrationv1.RuleWithOperations {
+	rules := make([]registrationv1.RuleWithOperations, 0, len(desired))
+	for key := range desired {
 		rules = append(rules, registrationv1.RuleWithOperations{
 			Operations: []registrationv1.OperationType{registrationv1.Delete},
 			Rule: registrationv1.Rule{
-				APIGroups:   []string{dep.Group},
-				APIVersions: []string{dep.Version},
-				Resources:   []string{dep.Resource},
+				APIGroups:   []string{key.Group},
+				APIVersions: []string{key.Version},
+				Resources:   []string{key.Resource},
 			},
 		})
 	}
+	return rules
+}
+
+// buildWebhookConfig creates a new ValidatingWebhookConfiguration with the given rules.
+func (w *WebhookInstaller) buildWebhookConfig(rules []registrationv1.RuleWithOperations) *registrationv1.ValidatingWebhookConfiguration {
+	failPolicy := registrationv1.Fail
+	sideEffects := registrationv1.SideEffectClassNone
+	webhookURL := w.WebhookURL
 
 	return &registrationv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
@@ -171,41 +254,4 @@ func (w *WebhookInstaller) buildWebhookConfig(wsPath string, deps []v1alpha1.Dep
 			Rules:         rules,
 		}},
 	}
-}
-
-// mergeRules appends rules for any dependency targets not already present in
-// the webhook configuration. Returns true if any rules were added.
-func (w *WebhookInstaller) mergeRules(whCfg *registrationv1.ValidatingWebhookConfiguration, deps []v1alpha1.DependencyTarget) bool {
-	if len(whCfg.Webhooks) == 0 {
-		return false
-	}
-
-	existing := make(map[ruleKey]struct{})
-	for _, rule := range whCfg.Webhooks[0].Rules {
-		for _, group := range rule.APIGroups {
-			for _, version := range rule.APIVersions {
-				for _, resource := range rule.Resources {
-					existing[ruleKey{Group: group, Version: version, Resource: resource}] = struct{}{}
-				}
-			}
-		}
-	}
-
-	changed := false
-	for _, dep := range deps {
-		key := ruleKey{Group: dep.Group, Version: dep.Version, Resource: dep.Resource}
-		if _, ok := existing[key]; ok {
-			continue
-		}
-		whCfg.Webhooks[0].Rules = append(whCfg.Webhooks[0].Rules, registrationv1.RuleWithOperations{
-			Operations: []registrationv1.OperationType{registrationv1.Delete},
-			Rule: registrationv1.Rule{
-				APIGroups:   []string{dep.Group},
-				APIVersions: []string{dep.Version},
-				Resources:   []string{dep.Resource},
-			},
-		})
-		changed = true
-	}
-	return changed
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +34,12 @@ type DependentReconciler struct {
 	Dependent        schema.GroupVersionResource
 	DependentKind    schema.GroupVersionKind
 	Dependencies     []v1alpha1.DependencyTarget
+
+	// knownClusters tracks cluster names where this reconciler has seen
+	// dependent resources. Used by CleanupAll to find and delete Dependencies
+	// across all workspaces when the owning DependencyRule is deleted.
+	mu            sync.Mutex
+	knownClusters map[string]struct{}
 }
 
 func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
@@ -42,6 +49,9 @@ func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Req
 		"namespace", req.Namespace,
 		"cluster", req.ClusterName,
 	)
+
+	// Track this cluster for cleanup on rule deletion.
+	r.trackCluster(req.ClusterName)
 
 	// Get the cluster client from the dependent's APIExport manager (for reading the dependent).
 	depCluster, err := r.DependentManager.GetCluster(ctx, req.ClusterName)
@@ -135,6 +145,62 @@ func (r *DependentReconciler) Reconcile(ctx context.Context, req mcreconcile.Req
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *DependentReconciler) trackCluster(clusterName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.knownClusters == nil {
+		r.knownClusters = make(map[string]struct{})
+	}
+	r.knownClusters[clusterName] = struct{}{}
+}
+
+// CleanupAll deletes all Dependency objects created by this rule across all
+// clusters the reconciler has seen. Called when the owning DependencyRule is deleted.
+func (r *DependentReconciler) CleanupAll(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithValues("rule", r.RuleName)
+
+	r.mu.Lock()
+	clusters := make([]string, 0, len(r.knownClusters))
+	for name := range r.knownClusters {
+		clusters = append(clusters, name)
+	}
+	r.mu.Unlock()
+
+	var errs []error
+	for _, clusterName := range clusters {
+		ctrlCluster, err := r.DepCtrlManager.GetCluster(ctx, clusterName)
+		if err != nil {
+			logger.Info("cluster no longer available, skipping cleanup", "cluster", clusterName)
+			continue
+		}
+		c := ctrlCluster.GetClient()
+
+		// List all Dependencies for this rule across all namespaces, then delete each.
+		// We list-then-delete rather than using DeleteAllOf because Dependency is
+		// namespace-scoped and DeleteAllOf without a namespace may only target the
+		// default namespace.
+		var deps v1alpha1.DependencyList
+		if err := c.List(ctx, &deps, client.MatchingLabels{
+			"dependencies.opendefense.cloud/rule": r.RuleName,
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("listing in cluster %s: %w", clusterName, err))
+			continue
+		}
+
+		logger.Info("cleaning up dependencies in cluster", "cluster", clusterName, "count", len(deps.Items))
+		for i := range deps.Items {
+			if err := c.Delete(ctx, &deps.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				errs = append(errs, fmt.Errorf("deleting %s in cluster %s: %w", deps.Items[i].Name, clusterName, err))
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("cleanup errors: %v", errs)
+	}
+	return nil
 }
 
 // cleanupDependencies removes all Dependency objects created by this rule for a specific dependent.
