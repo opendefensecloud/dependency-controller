@@ -11,6 +11,38 @@ The dependency-controller blocks the deletion of resources that still have activ
 
 ## How It Works
 
+### Lifecycle Overview
+
+```mermaid
+flowchart TD
+    A["Provider creates<br/><b>DependencyRule</b><br/>(e.g. VM → VPC)"] --> B["Rule Reconciler discovers rule<br/>via dep-ctrl APIExport"]
+    B --> C["Start dynamic multicluster manager<br/>for dependent's APIExport"]
+    B --> D["Install <b>ValidatingWebhook</b><br/>in dependency provider workspace"]
+
+    C --> E["Dependent watcher running<br/>(watching e.g. VMs)"]
+
+    E --> F{"Consumer creates/updates<br/>dependent resource<br/>(e.g. VM referencing VPC)"}
+    F --> G["Resolve field paths<br/>(e.g. .spec.vpcRef.name)"]
+    G --> H["Create <b>Dependency</b> marker<br/>in consumer workspace"]
+
+    H --> I{"Consumer tries to delete<br/>dependency (e.g. VPC)"}
+    I --> J["Webhook intercepts DELETE"]
+    J --> K{"Any Dependency markers<br/>reference this resource?"}
+    K -- Yes --> L["❌ Deny deletion<br/>'still referenced by VM/my-vm'"]
+    K -- No --> M["✅ Allow deletion"]
+
+    F --> N{"Consumer deletes<br/>dependent (e.g. VM)"}
+    N --> O["Clean up all Dependency<br/>markers for that dependent"]
+    O --> P["VPC now deletable"]
+
+    style A fill:#e1f0da
+    style D fill:#fff3cd
+    style H fill:#d4edfc
+    style L fill:#f8d7da
+    style M fill:#d4edda
+    style P fill:#d4edda
+```
+
 ### DependencyRule
 
 Along with their APIExport, providers create `DependencyRule` objects to describe how their
