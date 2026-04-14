@@ -35,12 +35,12 @@ flowchart TD
     N --> O["Clean up all Dependency<br/>markers for that dependent"]
     O --> P["VPC now deletable"]
 
-    style A fill:#e1f0da
-    style D fill:#fff3cd
-    style H fill:#d4edfc
-    style L fill:#f8d7da
-    style M fill:#d4edda
-    style P fill:#d4edda
+    style A fill:#e1f0da,color:#1a3e12
+    style D fill:#fff3cd,color:#664d03
+    style H fill:#d4edfc,color:#0a3069
+    style L fill:#f8d7da,color:#6e1520
+    style M fill:#d4edda,color:#0f5132
+    style P fill:#d4edda,color:#0f5132
 ```
 
 ### DependencyRule
