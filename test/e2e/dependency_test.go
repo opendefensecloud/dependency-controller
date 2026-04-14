@@ -80,11 +80,10 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		_, consumer1Path = envtest.NewWorkspaceFixture(GinkgoT(), cli, core.RootCluster.Path(), envtest.WithNamePrefix("consumer1"))
 		_, consumer2Path = envtest.NewWorkspaceFixture(GinkgoT(), cli, core.RootCluster.Path(), envtest.WithNamePrefix("consumer2"))
 
-		// === Dep-Ctrl Workspace: APIExport for DependencyRule + Dependency ===
+		// === Dep-Ctrl Workspace: APIExport for DependencyRule ===
 
 		applyFixtures(ctx, cli, depCtrlPath,
 			"../../config/kcp/apiresourceschema-dependencyrules.dependencies.opendefense.cloud.yaml",
-			"../../config/kcp/apiresourceschema-dependencies.dependencies.opendefense.cloud.yaml",
 			"../../config/kcp/apiexport-dependencies.opendefense.cloud.yaml",
 		)
 
@@ -108,9 +107,8 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		createBinding(ctx, cli, computeProvPath, "dependencies.opendefense.cloud", depCtrlPath)
 		createBinding(ctx, cli, networkProvPath, "dependencies.opendefense.cloud", depCtrlPath)
 
-		// Consumer workspaces bind to all three exports.
+		// Consumer workspaces bind to network and compute exports.
 		for _, cp := range []logicalcluster.Path{consumer1Path, consumer2Path} {
-			createBinding(ctx, cli, cp, "dependencies.opendefense.cloud", depCtrlPath)
 			createBinding(ctx, cli, cp, "network.test.io", networkProvPath)
 			createBinding(ctx, cli, cp, "compute.test.io", computeProvPath)
 		}
@@ -140,7 +138,6 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		waitForBinding(ctx, cli, computeProvPath, "dependencies.opendefense.cloud")
 		waitForBinding(ctx, cli, networkProvPath, "dependencies.opendefense.cloud")
 		for _, cp := range []logicalcluster.Path{consumer1Path, consumer2Path} {
-			waitForBinding(ctx, cli, cp, "dependencies.opendefense.cloud")
 			waitForBinding(ctx, cli, cp, "network.test.io")
 			waitForBinding(ctx, cli, cp, "compute.test.io")
 		}
@@ -183,10 +180,26 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		// Create the webhook installer and DependencyRule reconciler.
+		// Create the webhook-side rule watcher and registry.
+		registry := depwebhook.NewRuleRegistry()
+
+		ruleWatcher := &depwebhook.DependencyRuleWatcher{
+			DepCtrlManager: mgr,
+			BaseConfig:     kcpConfig,
+			Scheme:         scheme.Scheme,
+			Registry:       registry,
+		}
+
+		err = mcbuilder.ControllerManagedBy(mgr).
+			Named("dependencyrule-watcher").
+			For(&v1alpha1.DependencyRule{}).
+			Complete(mcreconcile.Func(ruleWatcher.Reconcile))
+		Expect(err).NotTo(HaveOccurred())
+
+		// Create the controller-side reconciler (webhook install only, no RBAC in e2e).
 		webhookInstaller := controller.NewWebhookInstaller(kcpConfig, webhookURL, caBundle)
 
-		ruleReconciler := controller.NewDependencyRuleReconciler(mgr, kcpConfig, scheme.Scheme)
+		ruleReconciler := controller.NewDependencyRuleReconciler(mgr)
 		ruleReconciler.WebhookInstaller = webhookInstaller
 
 		err = mcbuilder.ControllerManagedBy(mgr).
@@ -195,8 +208,8 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			Complete(mcreconcile.Func(ruleReconciler.Reconcile))
 		Expect(err).NotTo(HaveOccurred())
 
-		// Wire up the webhook handler with the dep-ctrl manager.
-		webhookHandler = &depwebhook.DeletionValidator{Manager: mgr}
+		// Wire up the webhook handler with the rule registry.
+		webhookHandler = &depwebhook.DeletionValidator{Registry: registry}
 
 		// Start the manager.
 		go func() {
@@ -210,7 +223,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 	})
 
 	Describe("dependency lifecycle", func() {
-		It("should create Dependency objects when a VM references a VPC", func() {
+		It("should block VPC deletion when a VM references it", func() {
 			By("creating a VPC in consumer1")
 			vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
 			setNestedField(vpc, "10.0.0.0/16", "spec", "cidr")
@@ -252,92 +265,58 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			setNestedField(vm, int64(4), "spec", "cpu")
 			Expect(cli.Cluster(consumer1Path).Create(ctx, vm)).To(Succeed())
 
-			By("verifying a Dependency object is created in consumer1")
+			By("waiting for the webhook to block VPC deletion")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				var deps v1alpha1.DependencyList
-				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
-					return false, fmt.Sprintf("list: %v", err)
+				vpcToDelete := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
+				err := cli.Cluster(consumer1Path).Delete(ctx, vpcToDelete)
+				if err == nil {
+					// The indexed cache hadn't synced the VM yet — recreate the VPC and retry.
+					recreated := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
+					setNestedField(recreated, "10.0.0.0/16", "spec", "cidr")
+					_ = cli.Cluster(consumer1Path).Create(ctx, recreated)
+					return false, "deletion was not blocked, recreated VPC"
 				}
-				for _, d := range deps.Items {
-					if d.Spec.Dependent.Name == "my-vm" && d.Spec.Dependency.Name == "my-vpc" {
-						return true, ""
-					}
+				if apierrors.IsNotFound(err) {
+					// VPC was deleted before webhook caught it — recreate and retry.
+					recreated := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
+					setNestedField(recreated, "10.0.0.0/16", "spec", "cidr")
+					_ = cli.Cluster(consumer1Path).Create(ctx, recreated)
+					return false, "VPC not found, recreated"
 				}
-				return false, fmt.Sprintf("no matching Dependency, got %d items", len(deps.Items))
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for Dependency")
+				if !apierrors.IsForbidden(err) {
+					return false, fmt.Sprintf("unexpected error: %v", err)
+				}
+				return true, ""
+			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook to block deletion")
 		})
 
-		It("should not create Dependencies in consumer2 where there are no VMs", func() {
-			By("verifying no Dependency objects exist in consumer2")
-			var deps v1alpha1.DependencyList
-			err := cli.Cluster(consumer2Path).List(ctx, &deps, client.InNamespace("default"))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(deps.Items).To(BeEmpty())
+		It("should not affect consumer2 where there are no VMs", func() {
+			By("creating a VPC in consumer2")
+			vpc := newUnstructured("network.test.io", "v1", "VPC", "isolated-vpc", "default")
+			setNestedField(vpc, "10.2.0.0/16", "spec", "cidr")
+			Expect(cli.Cluster(consumer2Path).Create(ctx, vpc)).To(Succeed())
+
+			By("deleting the VPC in consumer2 — should succeed (no dependents)")
+			Expect(cli.Cluster(consumer2Path).Delete(ctx, vpc)).To(Succeed())
 		})
 
-		It("should block VPC deletion via webhook when a Dependency exists", func() {
-			By("verifying a Dependency object exists in consumer1")
-			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				var deps v1alpha1.DependencyList
-				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
-					return false, fmt.Sprintf("list: %v", err)
-				}
-				for _, d := range deps.Items {
-					if d.Spec.Dependency.Name == "my-vpc" {
-						return true, ""
-					}
-				}
-				return false, fmt.Sprintf("no Dependency for my-vpc, got %d items", len(deps.Items))
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for Dependency to exist")
-
-			By("attempting to delete the VPC in consumer1 — should be blocked by webhook")
-			vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
-			err := cli.Cluster(consumer1Path).Delete(ctx, vpc)
-			Expect(err).To(HaveOccurred(), "expected deletion to be denied by webhook")
-			Expect(err.Error()).To(ContainSubstring("my-vpc"))
-		})
-
-		It("should clean up Dependencies when the dependent VM is deleted", func() {
+		It("should allow VPC deletion after the dependent VM is deleted", func() {
 			By("deleting the VM in consumer1")
 			vm := newUnstructured("compute.test.io", "v1", "VirtualMachine", "my-vm", "default")
 			Expect(cli.Cluster(consumer1Path).Delete(ctx, vm)).To(Succeed())
 
-			By("waiting for Dependency cleanup")
+			By("waiting for VPC deletion to be allowed")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				var deps v1alpha1.DependencyList
-				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
-					return false, fmt.Sprintf("list: %v", err)
-				}
-				for _, d := range deps.Items {
-					if d.Spec.Dependent.Name == "my-vm" {
-						return false, "Dependency for my-vm still exists"
-					}
+				vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
+				err := cli.Cluster(consumer1Path).Delete(ctx, vpc)
+				if err != nil {
+					return false, fmt.Sprintf("deletion still blocked: %v", err)
 				}
 				return true, ""
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for cleanup")
+			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for VPC to be deletable")
 		})
 
-		It("should allow VPC deletion via webhook after Dependencies are cleaned up", func() {
-			By("verifying no Dependencies reference the VPC")
-			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				var deps v1alpha1.DependencyList
-				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
-					return false, fmt.Sprintf("list: %v", err)
-				}
-				for _, d := range deps.Items {
-					if d.Spec.Dependency.Name == "my-vpc" {
-						return false, "Dependency for my-vpc still exists"
-					}
-				}
-				return true, ""
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for cleanup")
-
-			By("deleting the VPC in consumer1 — should succeed now")
-			vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
-			Expect(cli.Cluster(consumer1Path).Delete(ctx, vpc)).To(Succeed())
-		})
-
-		It("should clean up everything when the DependencyRule is deleted", func() {
+		It("should stop blocking after the DependencyRule is deleted", func() {
 			By("creating a new VPC in consumer1")
 			vpc := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
 			setNestedField(vpc, "10.1.0.0/16", "spec", "cidr")
@@ -349,42 +328,30 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			setNestedField(vm, int64(2), "spec", "cpu")
 			Expect(cli.Cluster(consumer1Path).Create(ctx, vm)).To(Succeed())
 
-			By("waiting for the Dependency to be created")
+			By("waiting for the webhook to block VPC deletion")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				var deps v1alpha1.DependencyList
-				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
-					return false, fmt.Sprintf("list: %v", err)
+				vpcToDelete := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
+				err := cli.Cluster(consumer1Path).Delete(ctx, vpcToDelete)
+				if err == nil {
+					recreated := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
+					setNestedField(recreated, "10.1.0.0/16", "spec", "cidr")
+					_ = cli.Cluster(consumer1Path).Create(ctx, recreated)
+					return false, "deletion was not blocked, recreated VPC"
 				}
-				for _, d := range deps.Items {
-					if d.Spec.Dependent.Name == "cleanup-vm" && d.Spec.Dependency.Name == "cleanup-vpc" {
-						return true, ""
-					}
+				if apierrors.IsNotFound(err) {
+					recreated := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
+					setNestedField(recreated, "10.1.0.0/16", "spec", "cidr")
+					_ = cli.Cluster(consumer1Path).Create(ctx, recreated)
+					return false, "VPC not found, recreated"
 				}
-				return false, fmt.Sprintf("no matching Dependency, got %d items", len(deps.Items))
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for Dependency")
-
-			By("verifying the webhook blocks VPC deletion")
-			err := cli.Cluster(consumer1Path).Delete(ctx, vpc.DeepCopy())
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("cleanup-vpc"))
+				return true, ""
+			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook to block deletion")
 
 			By("deleting the DependencyRule")
 			rule := &v1alpha1.DependencyRule{
 				ObjectMeta: metav1.ObjectMeta{Name: "vm-dependencies"},
 			}
 			Expect(cli.Cluster(computeProvPath).Delete(ctx, rule)).To(Succeed())
-
-			By("verifying Dependencies are proactively cleaned up in consumer1")
-			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				var deps v1alpha1.DependencyList
-				if err := cli.Cluster(consumer1Path).List(ctx, &deps, client.InNamespace("default")); err != nil {
-					return false, fmt.Sprintf("list: %v", err)
-				}
-				if len(deps.Items) > 0 {
-					return false, fmt.Sprintf("still have %d Dependencies", len(deps.Items))
-				}
-				return true, ""
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for Dependency cleanup")
 
 			By("verifying the webhook is removed from the network provider workspace")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
@@ -405,7 +372,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				return false, "webhook still exists"
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook removal")
 
-			By("verifying VPC deletion now succeeds without webhook")
+			By("verifying VPC deletion now succeeds")
 			Expect(cli.Cluster(consumer1Path).Delete(ctx, vpc)).To(Succeed())
 		})
 	})

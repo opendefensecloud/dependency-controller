@@ -4,21 +4,19 @@ import (
 	"flag"
 	"os"
 
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 
-	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
@@ -26,7 +24,7 @@ import (
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
-	"go.opendefense.cloud/dependency-controller/internal/controller"
+	"go.opendefense.cloud/dependency-controller/internal/webhook"
 )
 
 var scheme = runtime.NewScheme()
@@ -37,20 +35,15 @@ func init() {
 	utilruntime.Must(apisv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(tenancyv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(rbacv1.AddToScheme(scheme))
 }
 
 func main() {
 	var apiExportName string
 	var kcpBaseHost string
-	var systemMasterPath string
-	var serviceAccountName string
-	var serviceAccountNamespace string
+	var webhookPort int
 	flag.StringVar(&apiExportName, "api-export-name", "dependencies.opendefense.cloud", "Name of the dependency-controller's APIExport")
 	flag.StringVar(&kcpBaseHost, "kcp-base-host", "", "Base kcp host URL (without workspace path). If empty, derived from kubeconfig.")
-	flag.StringVar(&systemMasterPath, "system-master-path", "system:master", "Workspace path for system:master (for RBAC management)")
-	flag.StringVar(&serviceAccountName, "service-account-name", "dependency-controller", "Service account name for RBAC binding")
-	flag.StringVar(&serviceAccountNamespace, "service-account-namespace", "default", "Service account namespace for RBAC binding")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port for the webhook server")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -78,43 +71,43 @@ func main() {
 
 	mgr, err := mcmanager.New(cfg, depCtrlProvider, manager.Options{
 		Scheme: scheme,
+		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
+			Port: webhookPort,
+		}),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")
 		os.Exit(1)
 	}
 
-	// Create RBAC manager targeting system:master workspace.
-	systemMasterCfg := rest.CopyConfig(baseCfg)
-	systemMasterCfg.Host += logicalcluster.NewPath(systemMasterPath).RequestPath()
-	systemMasterClient, err := client.New(systemMasterCfg, client.Options{Scheme: scheme})
-	if err != nil {
-		setupLog.Error(err, "unable to create system:master client")
-		os.Exit(1)
-	}
+	// Create rule registry and watcher.
+	registry := webhook.NewRuleRegistry()
 
-	rbacMgr := &controller.RBACManager{
-		Client:                  systemMasterClient,
-		ServiceAccountName:      serviceAccountName,
-		ServiceAccountNamespace: serviceAccountNamespace,
+	watcher := &webhook.DependencyRuleWatcher{
+		DepCtrlManager: mgr,
+		BaseConfig:     baseCfg,
+		Scheme:         scheme,
+		Registry:       registry,
 	}
-
-	// Register the multicluster DependencyRule reconciler.
-	reconciler := controller.NewDependencyRuleReconciler(mgr)
-	reconciler.RBACManager = rbacMgr
 
 	if err := mcbuilder.ControllerManagedBy(mgr).
-		Named("dependencyrule").
+		Named("dependencyrule-watcher").
 		For(&v1alpha1.DependencyRule{}).
-		Complete(mcreconcile.Func(reconciler.Reconcile)); err != nil {
-		setupLog.Error(err, "unable to create DependencyRule controller")
+		Complete(mcreconcile.Func(watcher.Reconcile)); err != nil {
+		setupLog.Error(err, "unable to create DependencyRule watcher controller")
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting manager")
+	// Register webhook handler.
+	validator := &webhook.DeletionValidator{
+		Registry: registry,
+	}
+	mgr.GetWebhookServer().Register("/validate", &ctrlwebhook.Admission{Handler: validator})
+
+	setupLog.Info("starting webhook server")
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "manager failed")
+		setupLog.Error(err, "webhook server failed")
 		os.Exit(1)
 	}
 }

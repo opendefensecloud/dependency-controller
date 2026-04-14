@@ -89,69 +89,8 @@ type DependencyRuleList struct {
 	Items []DependencyRule `json:"items"`
 }
 
-// +kubebuilder:object:root=true
-
-// Dependency is a marker object that records a specific dependency relationship
-// between two resource instances. Created automatically by the dependency controller.
-type Dependency struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-
-	Spec DependencySpec `json:"spec"`
-}
-
-// DependencySpec identifies the specific dependent and dependency resource instances.
-type DependencySpec struct {
-	// Dependent identifies the resource that holds the reference.
-	Dependent ObjectReference `json:"dependent"`
-
-	// Dependency identifies the resource being depended upon (protected from deletion).
-	Dependency ObjectReference `json:"dependency"`
-
-	// RuleRef identifies the DependencyRule that caused this Dependency to be created.
-	RuleRef RuleReference `json:"ruleRef"`
-}
-
-// RuleReference identifies a DependencyRule by name and the workspace (logical cluster) it lives in.
-type RuleReference struct {
-	// Name is the name of the DependencyRule.
-	Name string `json:"name"`
-
-	// Cluster is the logical cluster name of the workspace where the DependencyRule lives.
-	Cluster string `json:"cluster"`
-}
-
-// ObjectReference identifies a specific resource instance.
-// Namespace is not included because the Dependency object itself is namespace-scoped
-// and lives in the same namespace as the dependent resource. The webhook lists
-// Dependencies across all namespaces to correctly handle cross-namespace references.
-type ObjectReference struct {
-	// Group is the API group of the resource.
-	Group string `json:"group"`
-
-	// Version is the API version of the resource.
-	Version string `json:"version"`
-
-	// Resource is the plural resource name.
-	Resource string `json:"resource"`
-
-	// Name is the name of the resource instance.
-	Name string `json:"name"`
-}
-
-// +kubebuilder:object:root=true
-
-// DependencyList contains a list of Dependency objects.
-type DependencyList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-
-	Items []Dependency `json:"items"`
-}
-
 func init() {
 	SchemeBuilder.Register(
 		&DependencyRule{}, &DependencyRuleList{},
-		&Dependency{}, &DependencyList{},
 	)
 }

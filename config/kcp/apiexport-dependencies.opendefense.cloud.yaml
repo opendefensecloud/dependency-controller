@@ -5,11 +5,6 @@ metadata:
 spec:
   resources:
   - group: dependencies.opendefense.cloud
-    name: dependencies
-    schema: v260410-7199b0b.dependencies.dependencies.opendefense.cloud
-    storage:
-      crd: {}
-  - group: dependencies.opendefense.cloud
     name: dependencyrules
     schema: v260410-d7832fa.dependencyrules.dependencies.opendefense.cloud
     storage:

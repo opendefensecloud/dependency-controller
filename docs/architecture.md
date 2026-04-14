@@ -15,9 +15,9 @@ Without coordination, deleting a VPC that is still referenced by a
 VirtualMachine leaves the VM in a broken state. The dependency-controller solves
 this by:
 
-1. Automatically discovering cross-resource references
-2. Creating `Dependency` marker objects that record each relationship
-3. Installing admission webhooks that block deletion of resources with active dependents
+1. Watching dependent resource types and indexing their references
+2. Installing admission webhooks that block deletion of resources with active dependents
+3. Querying indexed caches at admission time for instant dependency resolution
 
 ## Workspace Topology
 
@@ -27,8 +27,8 @@ through kcp's APIExport/APIBinding mechanism.
 ```mermaid
 graph LR
     subgraph DC["Dep-Ctrl Workspace"]
-        DCExport["APIExport:<br/>DependencyRule<br/>Dependency"]
-        Controller["dependency-controller<br/>· Rule watcher<br/>· Dependent watchers<br/>· Webhook server"]
+        DCExport["APIExport:<br/>DependencyRule"]
+        Controller["dependency-controller<br/>· Rule watcher<br/>· Indexed caches (per rule)<br/>· Webhook server"]
     end
 
     subgraph CP["Compute Provider WS"]
@@ -39,77 +39,95 @@ graph LR
 
     subgraph NP["Network Provider WS"]
         NPExport["APIExport: VPCs"]
+        NPWebhook["ValidatingWebhook"]
+    end
+
+    subgraph SM["system:master"]
+        SMROLE["ClusterRole:<br/>dependency-controller"]
     end
 
     subgraph CW["Consumer WS"]
-        CWBindings["APIBindings:<br/>compute, network, dep-ctrl"]
+        CWBindings["APIBindings:<br/>compute, network"]
         CWResources["VPC, VM"]
-        CWDep["Dependency (auto)"]
     end
 
     CPBinding -->|binds to| DCExport
     Controller -.->|watches rules via| DCExport
     Controller -.->|watches VMs via| CPExport
+    Controller -.->|installs webhook in| NP
+    Controller -.->|manages RBAC in| SM
     CWBindings -->|binds to| CPExport
     CWBindings -->|binds to| NPExport
-    CWBindings -->|binds to| DCExport
 
     style DC fill:#dbeafe,color:#1e3a5f
     style CP fill:#e1f0da,color:#1a3e12
     style NP fill:#e1f0da,color:#1a3e12
+    style SM fill:#f3e8ff,color:#4a1d7a
     style CW fill:#fef3c7,color:#664d03
 ```
 
 **Dep-ctrl workspace** -- hosts the controller and its APIExport
-(`dependencies.opendefense.cloud`), which provides the `DependencyRule` and
-`Dependency` custom resource types.
+(`dependencies.opendefense.cloud`), which provides the `DependencyRule`
+custom resource type.
 
 **Provider workspaces** -- each provider (compute, network, ...) has its own
 APIExport for the resources it provides. Providers bind to the dep-ctrl
 APIExport and create `DependencyRule` objects that declare how their resources
 reference other providers' resources.
 
-**Consumer workspaces** -- bind to all relevant providers plus dep-ctrl.
-Resources (VPCs, VMs) are created here. `Dependency` marker objects are
-automatically created by the controller in the same workspace.
+**Consumer workspaces** -- bind to the relevant provider exports (network,
+compute, etc.). Resources (VPCs, VMs) are created here. Consumers do not
+need to bind to the dep-ctrl export.
+
+**system:master** -- hosts a centralized `ClusterRole` that grants the
+dependency-controller read access to all dependent resource types across
+all workspaces. This role is dynamically updated as DependencyRules are
+created or deleted.
 
 ## Components
 
 ```mermaid
 flowchart TD
-    DR["DependencyRule Reconciler<br/><i>watches rules via dep-ctrl APIExport</i>"]
-    DR -->|"creates per rule"| DW["Dependent Reconciler<br/><i>watches dependent type via its APIExport</i>"]
-    DR -->|delegates to| WI["Webhook Installer<br/><i>manages ValidatingWebhookConfigurations</i>"]
-    DW -->|"creates/deletes"| DEP["Dependency markers<br/><i>via dep-ctrl APIExport</i>"]
-    WI -->|"installs in"| PW["Provider Workspaces"]
-    PW -->|"dispatches to"| DV["Deletion Validator<br/><i>admission webhook handler</i>"]
-    DV -->|"queries"| DEP
+    subgraph Controller["Controller Binary"]
+        DR["DependencyRule Reconciler<br/><i>watches rules via dep-ctrl APIExport</i>"]
+        DR -->|delegates to| WI["Webhook Installer<br/><i>manages ValidatingWebhookConfigurations</i>"]
+        DR -->|updates| RBAC["RBAC Manager<br/><i>ClusterRole in system:master</i>"]
+    end
 
-    style DR fill:#dbeafe,color:#1e3a5f
-    style DW fill:#dbeafe,color:#1e3a5f
-    style WI fill:#fef3c7,color:#664d03
-    style DEP fill:#e1f0da,color:#1a3e12
+    subgraph Webhook["Webhook Server Binary"]
+        RW["DependencyRule Watcher<br/><i>watches rules via dep-ctrl APIExport</i>"]
+        RW -->|"creates per rule"| IC["Indexed Cache<br/><i>watches dependent type via its APIExport</i>"]
+        IC -->|"indexed by field paths"| RR["Rule Registry<br/><i>webhook-internal state</i>"]
+        DV["Deletion Validator<br/><i>admission webhook handler</i>"]
+        DV -->|"queries"| RR
+    end
+
+    WI -->|"installs in"| PW["Provider Workspaces"]
+    PW -->|"dispatches to"| DV
+
+    style Controller fill:#dbeafe,color:#1e3a5f
+    style Webhook fill:#fce4ec,color:#6e1520
     style PW fill:#fef3c7,color:#664d03
-    style DV fill:#fce4ec,color:#6e1520
 ```
 
-### DependencyRule Reconciler
+The controller and webhook server are independently deployable. The controller
+handles webhook installation and RBAC management. The webhook server watches
+DependencyRules, manages per-rule indexed caches, and serves admission requests.
+
+### DependencyRule Reconciler (Controller)
 
 **File:** `internal/controller/dependencyrule_controller.go`
 
-The top-level controller. It watches `DependencyRule` objects across all
-workspaces that bind to the dep-ctrl APIExport, using a multicluster manager
-with an `apiexport` provider.
+Watches `DependencyRule` objects across all workspaces that bind to the dep-ctrl
+APIExport, using a multicluster manager with an `apiexport` provider.
 
 On reconcile it:
 
-1. **Ensures a dependent watcher** -- for each DependencyRule, it creates a
-   dedicated multicluster manager backed by the referenced APIExport's virtual
-   workspace. A `DependentReconciler` is registered on this manager to watch
-   the dependent resource type.
-
-2. **Ensures webhooks** -- delegates to the `WebhookInstaller` to create or
+1. **Ensures webhooks** -- delegates to the `WebhookInstaller` to create or
    update `ValidatingWebhookConfiguration` objects in provider workspaces.
+
+2. **Updates RBAC** -- calls `RBACManager.Reconcile()` to update the
+   ClusterRole in `system:master` with the current set of dependent GVRs.
 
 On deletion it:
 
@@ -117,67 +135,68 @@ On deletion it:
    remove the rule's contributions. If no rules remain for a workspace, the
    webhook is deleted entirely.
 
-2. **Cleans up Dependencies** -- calls `DependentReconciler.CleanupAll` to
-   actively delete all Dependency objects created by this rule across every
-   cluster the reconciler has seen.
+2. **Updates RBAC** -- reconciles the ClusterRole to remove the deleted
+   rule's dependent GVR if no other rules reference it.
 
-3. **Stops the manager** -- cancels the rule's manager context, which tears
-   down the controller, informer watch, and all associated goroutines.
+### DependencyRule Watcher (Webhook Server)
+
+**File:** `internal/webhook/rule_watcher.go`
+
+Watches `DependencyRule` objects via the dep-ctrl APIExport and manages per-rule
+multicluster managers with indexed caches. Runs inside the webhook server binary.
+
+On reconcile it:
+
+1. **Ensures an indexed cache** -- for each DependencyRule, creates a
+   dedicated multicluster manager backed by the referenced APIExport's virtual
+   workspace. Field indices are registered on the dependent informer for each
+   dependency target's field path (e.g., `.spec.vpcRef.name`). The manager
+   and indices are stored in the `RuleRegistry`.
+
+On deletion it:
+
+1. **Unregisters from the registry** -- removes the rule from the
+   `RuleRegistry`, which cancels the manager context, tearing down the
+   informer watch and all associated goroutines.
 
 #### Per-Rule Manager Lifecycle
 
 Each DependencyRule gets its own `mcmanager.Manager`. This 1:1 mapping ensures
 clean lifecycle management: when a rule is deleted, its manager can be cancelled
-without affecting other rules — even if two rules reference the same APIExport.
+without affecting other rules -- even if two rules reference the same APIExport.
 
-Managers are keyed by rule name in the `ruleState` map and started in background
-goroutines. On deletion, the reconciler first performs active cleanup (deleting
-Dependencies), then cancels the manager context to stop the watch.
+Managers are keyed by `clusterName/ruleName` in the `RuleRegistry` and started
+in background goroutines. On deletion, the watcher unregisters from the
+registry which cancels the manager context.
 
-### Dependent Reconciler
+### Rule Registry
 
-**File:** `internal/controller/dependent_controller.go`
+**File:** `internal/webhook/rule_registry.go`
 
-Watches a specific dependent resource type (e.g., VirtualMachines) through a
-dynamic multicluster manager. Uses two managers:
+Thread-safe shared state between the reconciler and the webhook. Maintains:
 
-- **DependentManager** -- reads dependent resources via the dependent's
-  APIExport virtual workspace
-- **DepCtrlManager** -- creates/deletes `Dependency` objects via the dep-ctrl's
-  APIExport virtual workspace
+- **Rule map** (`rules`): keyed by `clusterName/ruleName`, stores the per-rule
+  manager, dependent GVK, indexed fields, and readiness status.
+- **Reverse index** (`byTarget`): maps dependency target GVRs to rule keys,
+  enabling O(1) lookup of which rules protect a given resource type.
 
-Both managers discover the same consumer workspaces (by logical cluster name),
-so cross-manager operations work.
+Key methods:
 
-#### Cluster Tracking
+- `Register(key, state)` -- adds a rule and rebuilds the reverse index
+- `Unregister(key)` -- removes a rule, cancels its manager, rebuilds the index
+- `FindByTargetGVR(gvr)` -- returns rule entries with matching indexed fields
 
-The reconciler maintains a `knownClusters` set (protected by a mutex) that
-records every cluster name where it has seen dependent resources. This set is
-used during cleanup to find and delete Dependencies across all workspaces
-without relying on a subsequent reconcile event.
+### RBAC Manager
 
-On reconcile it:
+**File:** `internal/controller/rbac_manager.go`
 
-1. Tracks the cluster name in `knownClusters`
-2. Fetches the dependent resource as `Unstructured`
-3. For each dependency target in the rule, resolves the field path (e.g.,
-   `.spec.vpcRef.name`) to get the referenced resource name
-4. Creates a `Dependency` marker object in the consumer workspace if one doesn't
-   exist
-5. Cleans up stale `Dependency` objects if references changed
+Manages a `ClusterRole` and `ClusterRoleBinding` in the `system:master`
+workspace. The ClusterRole lists all dependent resource GVRs (with get/list/watch
+verbs) from active DependencyRules, grouped by API group for compact rules.
 
-On dependent deletion:
-
-1. Deletes all `Dependency` objects associated with that dependent (matched by
-   labels)
-
-On rule deletion (`CleanupAll`):
-
-1. Iterates all known clusters
-2. In each cluster, lists all Dependencies matching the rule's label
-3. Deletes each Dependency individually (list-then-delete rather than
-   `DeleteAllOf`, since `DeleteAllOf` without a namespace only targets the
-   default namespace for namespace-scoped resources)
+Called by the DependencyRule reconciler after any rule change (creation or
+deletion). The ClusterRoleBinding is created once and binds the controller's
+service account to the role.
 
 ### Webhook Installer
 
@@ -207,28 +226,30 @@ Key design:
 
 **File:** `internal/webhook/deletion_validator.go`
 
-The admission webhook handler. Registered as an HTTPS endpoint that kcp's
-admission system dispatches to.
+The admission webhook handler. Registered on controller-runtime's built-in
+webhook server.
 
 On a DELETE request it:
 
-1. Extracts the logical cluster name from the `kcp.io/cluster` annotation on the
-   object being deleted
-2. Uses the dep-ctrl manager's cluster client to list `Dependency` objects in
-   that consumer workspace
-3. Checks if any Dependency references the resource being deleted
-4. Denies the request with a descriptive message if active dependents exist
+1. Checks for the `skip-protection` annotation (allows bypass if present)
+2. Extracts the logical cluster name from the `kcp.io/cluster` annotation
+3. Finds all rules protecting this resource type via `RuleRegistry.FindByTargetGVR`
+4. For each matching rule, queries the indexed cache:
+   `cache.List(ctx, &list, client.MatchingFields{fieldPath: deletedResourceName})`
+5. If any dependents are found, denies the request with a descriptive message
+6. If a rule's cache is not ready, denies with a retriable message
 
 The handler is multicluster-aware and rule-agnostic -- it doesn't need to know
-which DependencyRule created the Dependencies.
+the details of each DependencyRule, only which GVRs are protected and how to
+query the indexed caches.
 
 ### Field Path Resolution
 
-**File:** `internal/webhook/fieldpath.go`
+**File:** `internal/fieldpath/fieldpath.go`
 
 Resolves dot-notation paths (e.g., `.spec.vpcRef.name`) against unstructured
-objects to extract dependency references. Used by the `DependentReconciler` to
-find which resources a dependent references.
+objects to extract dependency references. Used by the index functions registered
+on per-rule informers.
 
 ## API Types
 
@@ -264,37 +285,6 @@ spec:
         path: ".spec.vpcRef.name"
 ```
 
-### Dependency (namespace-scoped)
-
-Automatically created by the controller. Records a specific dependency between
-two resource instances.
-
-```yaml
-apiVersion: dependencies.opendefense.cloud/v1alpha1
-kind: Dependency
-metadata:
-  name: vm-dependencies--my-vm--vpcs.my-vpc
-  namespace: default
-  labels:
-    dependencies.opendefense.cloud/rule: vm-dependencies
-    dependencies.opendefense.cloud/rule-cluster: 2hx4p3vhfj9ac
-    dependencies.opendefense.cloud/dependent-name: my-vm
-spec:
-  dependent:
-    group: compute.test.io
-    version: v1
-    resource: virtualmachines
-    name: my-vm
-  dependency:
-    group: network.test.io
-    version: v1
-    resource: vpcs
-    name: my-vpc
-  ruleRef:
-    name: vm-dependencies
-    cluster: 2hx4p3vhfj9ac  # logical cluster name of the compute-provider workspace
-```
-
 ## Webhook Dispatch Flow
 
 kcp's admission webhook system routes requests through provider workspaces:
@@ -305,16 +295,17 @@ sequenceDiagram
     participant KCP as kcp API Server
     participant NP as Network Provider WS
     participant WH as Deletion Validator
-    participant DC as Dep-Ctrl Manager
+    participant IC as Indexed Cache
 
     C->>KCP: DELETE vpcs/my-vpc
     KCP->>NP: Resolve VPC's APIBinding
     NP->>KCP: ValidatingWebhookConfiguration found
     KCP->>WH: Dispatch admission request
     WH->>WH: Extract cluster name (consumer WS)
-    WH->>DC: List Dependencies in consumer WS
-    DC-->>WH: Dependency: VM/my-vm → VPC/my-vpc
-    WH-->>KCP: Deny: "still referenced by virtualmachines/my-vm"
+    WH->>WH: Find rules protecting vpcs GVR
+    WH->>IC: Query index: .spec.vpcRef.name = "my-vpc"
+    IC-->>WH: VirtualMachine/my-vm
+    WH-->>KCP: Deny: "still referenced by VirtualMachine/my-vm"
     KCP-->>C: 403 Forbidden
 ```
 
@@ -352,9 +343,8 @@ webhook is removed entirely.
 
 ## Force-Deleting Protected Resources
 
-If the normal dependency lifecycle has broken down (e.g., stale Dependency
-markers, crashed controller, orphaned Dependencies), operators can bypass
-deletion protection by annotating the resource:
+If the dependency lifecycle has broken down (e.g., stale caches, crashed
+controller), operators can bypass deletion protection by annotating the resource:
 
 ```sh
 kubectl annotate vpc my-vpc dependencies.opendefense.cloud/skip-protection=true
@@ -362,7 +352,7 @@ kubectl delete vpc my-vpc
 ```
 
 The webhook checks for this annotation and allows deletion regardless of
-active Dependencies.
+active dependents.
 
 ## Known Limitations
 
@@ -374,13 +364,11 @@ rule B declares VPC depends on VM), neither resource can be deleted through
 normal means. Operators must use the `skip-protection` annotation to break
 the cycle.
 
-### Eventual consistency gap on creation
+### Informer cache lag
 
 Between the moment a dependent resource is created (e.g., a VM referencing a
-VPC) and the moment the controller reconciles it (creating the Dependency
-marker), the dependency resource can be deleted without the webhook blocking
-it. This window is typically sub-second but is inherent to the asynchronous
-reconciliation model. The Dependency objects act as a pre-computed index that
-makes webhook decisions fast; doing synchronous lookups in the admission path
-would require the webhook to hold references to every dynamic APIExport
-manager and would add significant latency to every DELETE request.
+VPC) and the moment the informer cache syncs, the dependency resource can be
+deleted without the webhook blocking it. This window is typically sub-second
+and is inherent to the informer-based caching model. Similarly, when a
+dependent is deleted, there is a brief window before the cache reflects the
+removal, during which the webhook may still block deletion of the dependency.

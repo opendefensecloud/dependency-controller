@@ -81,12 +81,17 @@ vet: ## Run go vet.
 ##@ Build
 
 .PHONY: build
-build: generate ## Build the controller binary.
+build: generate ## Build the controller and webhook binaries.
 	$(GO) build -o $(LOCALBIN)/dependency-controller ./cmd/controller/
+	$(GO) build -o $(LOCALBIN)/dependency-webhook ./cmd/webhook/
 
 .PHONY: run
 run: generate ## Run the controller from source.
 	$(GO) run ./cmd/controller/
+
+.PHONY: run-webhook
+run-webhook: generate ## Run the webhook server from source.
+	$(GO) run ./cmd/webhook/
 
 .PHONY: docker-build
 docker-build: ## Build the Docker image.

@@ -8,24 +8,27 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/kcp-dev/logicalcluster/v3"
-	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+)
 
-	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
-	"go.opendefense.cloud/dependency-controller/internal/controller"
+const (
+	// AnnotationSkipProtection is the annotation key that, when set to "true"
+	// on a resource, causes the deletion webhook to skip protection checks.
+	AnnotationSkipProtection = "dependencies.opendefense.cloud/skip-protection"
 )
 
 // DeletionValidator is a validating admission webhook handler that blocks
-// deletion of resources that have active Dependency objects pointing to them.
+// deletion of resources that have active dependents referencing them.
 //
-// It is multicluster-aware: it extracts the logical cluster name from the
-// object being deleted (via the kcp.io/cluster annotation) and uses the
-// dep-ctrl manager's cluster client to list Dependencies in that workspace.
+// It queries indexed caches maintained by the DependencyRuleWatcher's
+// per-rule multicluster managers. No Dependency marker objects are needed.
 type DeletionValidator struct {
-	Manager mcmanager.Manager
+	Registry *RuleRegistry
 }
 
 func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) admission.Response {
@@ -35,7 +38,7 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		return admission.Allowed("")
 	}
 
-	// Parse the object once for both skip-protection and cluster extraction.
+	// Parse the object for skip-protection annotation and cluster extraction.
 	obj, err := objectFromRequest(req)
 	if err != nil {
 		logger.Error(err, "failed to parse object from admission request")
@@ -43,7 +46,7 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 	}
 
 	// Allow deletion if the resource has the skip-protection annotation.
-	if obj.GetAnnotations()[controller.AnnotationSkipProtection] == "true" {
+	if obj.GetAnnotations()[AnnotationSkipProtection] == "true" {
 		logger.Info("skip-protection annotation present, allowing deletion")
 		return admission.Allowed("skip-protection annotation present")
 	}
@@ -56,29 +59,48 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	cluster, err := v.Manager.GetCluster(ctx, clusterName.String())
-	if err != nil {
-		logger.Error(err, "failed to get cluster", "cluster", clusterName)
-		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("failed to get cluster %s: %w", clusterName, err))
-	}
-	c := cluster.GetClient()
-
-	// List all Dependency objects across all namespaces in this workspace.
-	// We don't filter by namespace because the dependent and dependency may
-	// be in different namespaces.
-	var deps v1alpha1.DependencyList
-	if err := c.List(ctx, &deps); err != nil {
-		logger.Error(err, "failed to list Dependency objects")
-		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("failed to check dependencies: %w", err))
+	// Find all rules that protect this resource type.
+	targetGVR := schema.GroupVersionResource{
+		Group:    req.Resource.Group,
+		Version:  req.Resource.Version,
+		Resource: req.Resource.Resource,
 	}
 
+	entries := v.Registry.FindByTargetGVR(targetGVR)
+	if len(entries) == 0 {
+		return admission.Allowed("")
+	}
+
+	// Query each matching rule's indexed cache for dependents referencing this resource.
 	var blockers []string
-	for _, dep := range deps.Items {
-		ref := dep.Spec.Dependency
-		if ref.Group == req.Resource.Group &&
-			ref.Resource == req.Resource.Resource &&
-			ref.Name == req.Name {
-			blockers = append(blockers, fmt.Sprintf("%s/%s", dep.Spec.Dependent.Resource, dep.Spec.Dependent.Name))
+	for _, entry := range entries {
+		if !entry.State.Ready {
+			msg := fmt.Sprintf("dependency check unavailable for rule %s: cache warming up, retry later", entry.Key)
+			logger.Info(msg)
+			return admission.Denied(msg)
+		}
+
+		cluster, err := entry.State.Manager.GetCluster(ctx, clusterName.String())
+		if err != nil {
+			// Cluster not known to this rule's manager — no dependents here.
+			logger.V(1).Info("cluster not found in rule manager, skipping", "rule", entry.Key, "cluster", clusterName)
+			continue
+		}
+
+		// Query the field index for dependents referencing the deleted resource name.
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(entry.State.DependentGVK.GroupVersion().WithKind(entry.State.DependentGVK.Kind + "List"))
+
+		err = cluster.GetCache().List(ctx, list, client.MatchingFields{
+			entry.MatchedField.FieldPath: req.Name,
+		})
+		if err != nil {
+			logger.Error(err, "failed to query indexed cache", "rule", entry.Key)
+			return admission.Errored(http.StatusInternalServerError, fmt.Errorf("failed to check dependencies for rule %s: %w", entry.Key, err))
+		}
+
+		for _, item := range list.Items {
+			blockers = append(blockers, fmt.Sprintf("%s/%s", entry.State.DependentGVK.Kind, item.GetName()))
 		}
 	}
 

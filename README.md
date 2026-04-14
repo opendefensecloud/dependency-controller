@@ -16,31 +16,24 @@ The dependency-controller blocks the deletion of resources that still have activ
 ```mermaid
 flowchart TD
     A["Provider creates<br/><b>DependencyRule</b><br/>(e.g. VM → VPC)"] --> B["Rule Reconciler discovers rule<br/>via dep-ctrl APIExport"]
-    B --> C["Start dynamic multicluster manager<br/>for dependent's APIExport"]
+    B --> C["Start indexed cache<br/>watching dependent type<br/>(e.g. VMs via APIExport VW)"]
     B --> D["Install <b>ValidatingWebhook</b><br/>in dependency provider workspace"]
+    B --> E["Update RBAC ClusterRole<br/>in system:master"]
 
-    C --> E["Dependent watcher running<br/>(watching e.g. VMs)"]
+    C --> F["Informer indexes dependents<br/>by field paths<br/>(e.g. .spec.vpcRef.name)"]
 
-    E --> F{"Consumer creates/updates<br/>dependent resource<br/>(e.g. VM referencing VPC)"}
-    F --> G["Resolve field paths<br/>(e.g. .spec.vpcRef.name)"]
-    G --> H["Create <b>Dependency</b> marker<br/>in consumer workspace"]
-
-    H --> I{"Consumer tries to delete<br/>dependency (e.g. VPC)"}
-    I --> J["Webhook intercepts DELETE"]
-    J --> K{"Any Dependency markers<br/>reference this resource?"}
-    K -- Yes --> L["❌ Deny deletion<br/>'still referenced by VM/my-vm'"]
-    K -- No --> M["✅ Allow deletion"]
-
-    F --> N{"Consumer deletes<br/>dependent (e.g. VM)"}
-    N --> O["Clean up all Dependency<br/>markers for that dependent"]
-    O --> P["VPC now deletable"]
+    F --> G{"Consumer tries to delete<br/>dependency (e.g. VPC)"}
+    G --> H["Webhook intercepts DELETE"]
+    H --> I["Query indexed cache:<br/>any VMs where .spec.vpcRef.name = my-vpc?"]
+    I -- Yes --> J["Deny deletion<br/>'still referenced by VirtualMachine/my-vm'"]
+    I -- No --> K["Allow deletion"]
 
     style A fill:#e1f0da,color:#1a3e12
     style D fill:#fff3cd,color:#664d03
-    style H fill:#d4edfc,color:#0a3069
-    style L fill:#f8d7da,color:#6e1520
-    style M fill:#d4edda,color:#0f5132
-    style P fill:#d4edda,color:#0f5132
+    style E fill:#fff3cd,color:#664d03
+    style F fill:#d4edfc,color:#0a3069
+    style J fill:#f8d7da,color:#6e1520
+    style K fill:#d4edda,color:#0f5132
 ```
 
 ### DependencyRule
@@ -77,62 +70,62 @@ spec:
         path: ".spec.subnetRef.name"
 ```
 
-### Dependency (marker object)
+### Indexed Cache
 
-When the controller observes a VM that references a VPC via the declared field path, it
-automatically creates a namespaced `Dependency` marker object in the same consumer workspace:
-
-```yaml
-apiVersion: dependencies.opendefense.cloud/v1alpha1
-kind: Dependency
-metadata:
-  name: vm-dependencies--my-vm--vpcs.my-vpc
-  namespace: default
-spec:
-  dependent:
-    group: compute.example.com
-    version: v1alpha1
-    resource: virtualmachines
-    name: my-vm
-    namespace: default
-  dependency:
-    group: network.example.com
-    version: v1alpha1
-    resource: vpcs
-    name: my-vpc
-    namespace: default
-  ruleName: vm-dependencies
-```
+For each DependencyRule, the controller starts a multicluster manager that watches the
+dependent resource type (e.g., VirtualMachines) via the referenced APIExport's virtual
+workspace. Field indices are registered on the dependent informer for each dependency
+target's field path (e.g., `.spec.vpcRef.name`), enabling O(1) lookups by referenced
+resource name.
 
 ### Admission Webhook
 
-A KCP ValidatingAdmissionWebhook intercepts DELETE requests. If any `Dependency` object
-references the resource being deleted, the request is denied with a clear error message
+A KCP ValidatingAdmissionWebhook intercepts DELETE requests. When a delete is attempted,
+the webhook queries the indexed caches to find dependent resources that reference the
+resource being deleted. If any are found, the request is denied with a clear error message
 listing the dependents. Finalizers are intentionally avoided as they conflict with KCP's
 sync-agent.
 
 ### Architecture
 
-The dependency-controller runs in its own workspace with its own APIExport for
-`DependencyRule` and `Dependency` types. Providers and consumers bind to it.
+The dependency-controller runs in its own workspace with its own APIExport for the
+`DependencyRule` type. Providers bind to it to create rules. Consumer workspaces do
+not need to bind to the dep-ctrl export.
 
-```
-Dep-Ctrl Workspace              Compute Provider WS           Network Provider WS
-+------------------------+     +----------------------+      +------------------+
-| APIExport:             |<----| APIBinding (dep-ctrl) |      | APIExport:       |
-|   DependencyRule       |     | APIExport: compute    |      |   VPCs           |
-|   Dependency           |     | DependencyRule:       |      +------------------+
-|                        |     |   dependent:          |
-| dependency-controller  |     |     apiExportRef:     |      Consumer WS
-|  +- Rule watcher ------+-mc--+       path: root:...  |      +------------------+
-|  |  (via own export)   |     |       name: compute   |<-----| APIBinding:      |
-|  +- Dep watcher -------+-mc--|   deps: [vpcs]        |      |   compute        |
-|  |  (via compute exp)  |     +---------------------- +      |   network        |
-|  +- Webhook            |                                    |   dep-ctrl       |
-+------------------------+                                    |                  |
-                                                              | VPC, VM          |
-                                                              | Dependency(auto) |
-                                                              +------------------+
+```mermaid
+graph LR
+    subgraph DC["Dep-Ctrl Workspace"]
+        DCExport["APIExport:<br/>DependencyRule"]
+        Controller["dependency-controller<br/>· Rule watcher<br/>· Indexed caches (per rule)<br/>· Webhook server"]
+    end
+
+    subgraph CP["Compute Provider WS"]
+        CPBinding["APIBinding: dep-ctrl"]
+        CPExport["APIExport: compute"]
+        CPRule["DependencyRule:<br/>VM → VPC"]
+    end
+
+    subgraph NP["Network Provider WS"]
+        NPExport["APIExport: VPCs"]
+        NPWebhook["ValidatingWebhook"]
+    end
+
+    subgraph CW["Consumer WS"]
+        CWBindings["APIBindings:<br/>compute, network"]
+        CWResources["VPC, VM"]
+    end
+
+    CPBinding -->|binds to| DCExport
+    Controller -.->|watches rules via| DCExport
+    Controller -.->|watches VMs via| CPExport
+    Controller -.->|installs webhook in| NP
+    CWBindings -->|binds to| CPExport
+    CWBindings -->|binds to| NPExport
+
+    style DC fill:#dbeafe,color:#1e3a5f
+    style CP fill:#e1f0da,color:#1a3e12
+    style NP fill:#e1f0da,color:#1a3e12
+    style CW fill:#fef3c7,color:#664d03
 ```
 
 **Two levels of multicluster watching:**
@@ -140,10 +133,12 @@ Dep-Ctrl Workspace              Compute Provider WS           Network Provider W
 1. **DependencyRule reconciler** watches rules via the dep-ctrl's own APIExport virtual
    workspace. It discovers provider workspaces that bind to the dep-ctrl export.
 
-2. **Dependent watcher** (dynamic, per-rule) watches the dependent resource type (e.g., VMs)
-   via the referenced APIExport's virtual workspace. For each VM, it resolves field paths
-   to find dependency references and creates `Dependency` marker objects via the dep-ctrl's
-   virtual workspace.
+2. **Indexed cache** (dynamic, per-rule) watches the dependent resource type (e.g., VMs)
+   via the referenced APIExport's virtual workspace. Field indices enable the webhook to
+   quickly find dependents referencing a given resource.
+
+**RBAC via system:master:** The controller maintains a ClusterRole in the `system:master`
+workspace that grants read access to all dependent resource types declared by active rules.
 
 ## Development
 

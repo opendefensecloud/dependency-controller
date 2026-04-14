@@ -7,8 +7,6 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-
-	"go.opendefense.cloud/dependency-controller/internal/controller"
 )
 
 func makeRequest(annotations map[string]string) admission.Request {
@@ -86,10 +84,10 @@ func TestObjectFromRequest_InvalidJSON(t *testing.T) {
 
 func TestSkipProtection_Present(t *testing.T) {
 	req := makeRequest(map[string]string{
-		controller.AnnotationSkipProtection: "true",
+		AnnotationSkipProtection: "true",
 	})
 	obj, _ := objectFromRequest(req)
-	if obj.GetAnnotations()[controller.AnnotationSkipProtection] != "true" {
+	if obj.GetAnnotations()[AnnotationSkipProtection] != "true" {
 		t.Error("expected skip-protection annotation to be true")
 	}
 }
@@ -97,17 +95,17 @@ func TestSkipProtection_Present(t *testing.T) {
 func TestSkipProtection_Absent(t *testing.T) {
 	req := makeRequest(map[string]string{})
 	obj, _ := objectFromRequest(req)
-	if obj.GetAnnotations()[controller.AnnotationSkipProtection] == "true" {
+	if obj.GetAnnotations()[AnnotationSkipProtection] == "true" {
 		t.Error("expected skip-protection annotation to be absent")
 	}
 }
 
 func TestSkipProtection_WrongValue(t *testing.T) {
 	req := makeRequest(map[string]string{
-		controller.AnnotationSkipProtection: "false",
+		AnnotationSkipProtection: "false",
 	})
 	obj, _ := objectFromRequest(req)
-	if obj.GetAnnotations()[controller.AnnotationSkipProtection] == "true" {
+	if obj.GetAnnotations()[AnnotationSkipProtection] == "true" {
 		t.Error("expected skip-protection to not match with value 'false'")
 	}
 }
