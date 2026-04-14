@@ -24,23 +24,40 @@ this by:
 The system uses three workspace roles. Each runs independently and communicates
 through kcp's APIExport/APIBinding mechanism.
 
-```
-Dep-Ctrl Workspace              Compute Provider WS           Network Provider WS
-+------------------------+     +----------------------+      +------------------+
-| APIExport:             |<----| APIBinding (dep-ctrl)|      | APIExport:       |
-|   DependencyRule       |     | APIExport: compute   |      |   VPCs           |
-|   Dependency           |     | DependencyRule:       |      +------------------+
-|                        |     |   VM -> VPC            |
-| dependency-controller  |     +----------------------+      Consumer WS
-|  +- Rule watcher       |                                    +------------------+
-|  |  (via own export)   |                                    | APIBindings:     |
-|  +- Dependent watchers |                                    |   compute        |
-|  |  (dynamic, per exp) |                                    |   network        |
-|  +- Webhook server     |                                    |   dep-ctrl       |
-+------------------------+                                    |                  |
-                                                              | VPC, VM          |
-                                                              | Dependency(auto) |
-                                                              +------------------+
+```mermaid
+graph LR
+    subgraph DC["Dep-Ctrl Workspace"]
+        DCExport["APIExport:<br/>DependencyRule<br/>Dependency"]
+        Controller["dependency-controller<br/>· Rule watcher<br/>· Dependent watchers<br/>· Webhook server"]
+    end
+
+    subgraph CP["Compute Provider WS"]
+        CPBinding["APIBinding: dep-ctrl"]
+        CPExport["APIExport: compute"]
+        CPRule["DependencyRule:<br/>VM → VPC"]
+    end
+
+    subgraph NP["Network Provider WS"]
+        NPExport["APIExport: VPCs"]
+    end
+
+    subgraph CW["Consumer WS"]
+        CWBindings["APIBindings:<br/>compute, network, dep-ctrl"]
+        CWResources["VPC, VM"]
+        CWDep["Dependency (auto)"]
+    end
+
+    CPBinding -->|binds to| DCExport
+    Controller -.->|watches rules via| DCExport
+    Controller -.->|watches VMs via| CPExport
+    CWBindings -->|binds to| CPExport
+    CWBindings -->|binds to| NPExport
+    CWBindings -->|binds to| DCExport
+
+    style DC fill:#dbeafe,color:#1e3a5f
+    style CP fill:#e1f0da,color:#1a3e12
+    style NP fill:#e1f0da,color:#1a3e12
+    style CW fill:#fef3c7,color:#664d03
 ```
 
 **Dep-ctrl workspace** -- hosts the controller and its APIExport
@@ -57,6 +74,24 @@ Resources (VPCs, VMs) are created here. `Dependency` marker objects are
 automatically created by the controller in the same workspace.
 
 ## Components
+
+```mermaid
+flowchart TD
+    DR["DependencyRule Reconciler<br/><i>watches rules via dep-ctrl APIExport</i>"]
+    DR -->|"creates per rule"| DW["Dependent Reconciler<br/><i>watches dependent type via its APIExport</i>"]
+    DR -->|delegates to| WI["Webhook Installer<br/><i>manages ValidatingWebhookConfigurations</i>"]
+    DW -->|"creates/deletes"| DEP["Dependency markers<br/><i>via dep-ctrl APIExport</i>"]
+    WI -->|"installs in"| PW["Provider Workspaces"]
+    PW -->|"dispatches to"| DV["Deletion Validator<br/><i>admission webhook handler</i>"]
+    DV -->|"queries"| DEP
+
+    style DR fill:#dbeafe,color:#1e3a5f
+    style DW fill:#dbeafe,color:#1e3a5f
+    style WI fill:#fef3c7,color:#664d03
+    style DEP fill:#e1f0da,color:#1a3e12
+    style PW fill:#fef3c7,color:#664d03
+    style DV fill:#fce4ec,color:#6e1520
+```
 
 ### DependencyRule Reconciler
 
@@ -264,26 +299,23 @@ spec:
 
 kcp's admission webhook system routes requests through provider workspaces:
 
-```
-Consumer deletes VPC
-        |
-        v
-kcp resolves VPC's APIBinding -> network provider workspace
-        |
-        v
-Finds ValidatingWebhookConfiguration in network provider WS
-        |
-        v
-Dispatches to dependency-controller's webhook URL
-        |
-        v
-DeletionValidator extracts cluster name (consumer WS)
-        |
-        v
-Lists Dependencies in consumer WS -> finds VM depends on VPC
-        |
-        v
-Denies deletion: "cannot delete vpcs/my-vpc: still referenced by virtualmachines/my-vm"
+```mermaid
+sequenceDiagram
+    participant C as Consumer
+    participant KCP as kcp API Server
+    participant NP as Network Provider WS
+    participant WH as Deletion Validator
+    participant DC as Dep-Ctrl Manager
+
+    C->>KCP: DELETE vpcs/my-vpc
+    KCP->>NP: Resolve VPC's APIBinding
+    NP->>KCP: ValidatingWebhookConfiguration found
+    KCP->>WH: Dispatch admission request
+    WH->>WH: Extract cluster name (consumer WS)
+    WH->>DC: List Dependencies in consumer WS
+    DC-->>WH: Dependency: VM/my-vm → VPC/my-vpc
+    WH-->>KCP: Deny: "still referenced by virtualmachines/my-vm"
+    KCP-->>C: 403 Forbidden
 ```
 
 ## Multi-Rule Webhook Merging
@@ -292,14 +324,26 @@ When multiple DependencyRules target the same provider workspace (e.g., both VM
 and ManagedDB depend on resources from the network provider), the webhook
 installer merges them into a single webhook:
 
-```
-Rule "vm-deps":       VM -> VPC (network-provider)
-Rule "manageddb-deps": ManagedDB -> FirewallRule (network-provider)
+```mermaid
+graph LR
+    subgraph Rules
+        R1["Rule: vm-deps<br/>VM → VPC"]
+        R2["Rule: manageddb-deps<br/>ManagedDB → FirewallRule"]
+    end
 
-Webhook in network-provider workspace:
-  Rules:
-    - DELETE vpcs (network.test.io/v1)
-    - DELETE firewallrules (network.test.io/v1)
+    subgraph NP["Network Provider WS"]
+        WH["ValidatingWebhookConfiguration:<br/>dependency-controller"]
+        WR1["Rule: DELETE vpcs<br/>(network.test.io/v1)"]
+        WR2["Rule: DELETE firewallrules<br/>(network.test.io/v1)"]
+        WH --- WR1
+        WH --- WR2
+    end
+
+    R1 -->|contributes| WR1
+    R2 -->|contributes| WR2
+
+    style Rules fill:#dbeafe,color:#1e3a5f
+    style NP fill:#e1f0da,color:#1a3e12
 ```
 
 Deleting one rule removes only its contributions. The webhook is updated to
