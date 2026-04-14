@@ -1,0 +1,66 @@
+image:
+  repository: ghcr.io/opendefense/dependency-controller
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicas: 1
+
+apiExportName: dependencies.opendefense.cloud
+
+# Base kcp host URL (without workspace path). If empty, derived from kubeconfig.
+kcpBaseHost: ""
+
+webhookPort: 9443
+
+# Directory where TLS cert and key are mounted inside the container.
+tlsCertDir: /etc/webhook-tls
+
+healthProbeBindAddress: ":8081"
+
+# Secret containing a kubeconfig for connecting to kcp.
+# Required when the webhook runs outside kcp (e.g., in a management cluster).
+kubeconfig:
+  secretName: ""
+  key: "kubeconfig"
+
+serviceAccount:
+  create: true
+  name: dependency-webhook
+  namespace: ""
+  annotations: {}
+
+service:
+  port: 443
+  targetPort: 9443
+  # Set to NodePort and specify nodePort to expose the webhook outside the cluster.
+  type: ClusterIP
+  nodePort: ""
+
+tls:
+  # Use an existing Secret containing tls.crt, tls.key, and ca.crt.
+  # When set, cert-manager is not used regardless of certManager.enabled.
+  existingSecret: ""
+
+  # Use cert-manager to issue a TLS certificate.
+  certManager:
+    enabled: true
+    # issuerRef is required when certManager is enabled.
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+    # Additional DNS names to include in the certificate (e.g., localhost for testing).
+    additionalDnsNames: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

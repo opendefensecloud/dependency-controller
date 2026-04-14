@@ -1,0 +1,57 @@
+image:
+  repository: ghcr.io/opendefense/dependency-controller
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicas: 1
+
+apiExportName: dependencies.opendefense.cloud
+
+# Base kcp host URL (without workspace path). If empty, derived from kubeconfig.
+kcpBaseHost: ""
+
+# Direct URL of the root shard (bypasses kcp front proxy).
+# Required for RBAC management in system:master.
+rootShardHost: ""
+
+systemMasterPath: "system:master"
+
+# Secret containing a kubeconfig for connecting to kcp.
+# Required when the controller runs outside kcp (e.g., in a management cluster).
+kubeconfig:
+  secretName: ""
+  key: "kubeconfig"
+
+# Webhook configuration for ValidatingWebhookConfiguration installation.
+webhook:
+  # URL of the dependency-webhook server.
+  # Example: https://dependency-webhook.dependency-system.svc:443/validate
+  url: ""
+
+  # Name of the Secret containing the webhook's TLS certificate (with ca.crt key).
+  # When using cert-manager with the dependency-webhook chart, this is
+  # typically "<webhook-release>-dependency-webhook-tls".
+  caBundle:
+    secretName: ""
+
+serviceAccount:
+  create: true
+  name: dependency-controller
+  namespace: ""
+  annotations: {}
+
+healthProbeBindAddress: ":8081"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

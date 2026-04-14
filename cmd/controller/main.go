@@ -11,6 +11,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -43,14 +44,22 @@ func init() {
 func main() {
 	var apiExportName string
 	var kcpBaseHost string
+	var rootShardHost string
 	var systemMasterPath string
 	var serviceAccountName string
 	var serviceAccountNamespace string
+	var webhookURL string
+	var webhookCABundlePath string
+	var healthProbeBindAddress string
 	flag.StringVar(&apiExportName, "api-export-name", "dependencies.opendefense.cloud", "Name of the dependency-controller's APIExport")
 	flag.StringVar(&kcpBaseHost, "kcp-base-host", "", "Base kcp host URL (without workspace path). If empty, derived from kubeconfig.")
+	flag.StringVar(&rootShardHost, "root-shard-host", "", "Direct URL of the root shard (bypasses kcp front proxy). Required for RBAC management in system:master.")
 	flag.StringVar(&systemMasterPath, "system-master-path", "system:master", "Workspace path for system:master (for RBAC management)")
 	flag.StringVar(&serviceAccountName, "service-account-name", "dependency-controller", "Service account name for RBAC binding")
 	flag.StringVar(&serviceAccountNamespace, "service-account-namespace", "default", "Service account namespace for RBAC binding")
+	flag.StringVar(&webhookURL, "webhook-url", "", "URL of the dependency-webhook server (e.g. https://dependency-webhook.ns.svc:443/validate)")
+	flag.StringVar(&webhookCABundlePath, "webhook-ca-bundle-path", "", "Path to CA bundle PEM file for the webhook server's TLS certificate")
+	flag.StringVar(&healthProbeBindAddress, "health-probe-bind-address", ":8081", "Address to bind the health probe endpoint")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -77,17 +86,31 @@ func main() {
 	}
 
 	mgr, err := mcmanager.New(cfg, depCtrlProvider, manager.Options{
-		Scheme: scheme,
+		Scheme:                 scheme,
+		HealthProbeBindAddress: healthProbeBindAddress,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")
 		os.Exit(1)
 	}
 
-	// Create RBAC manager targeting system:master workspace.
-	systemMasterCfg := rest.CopyConfig(baseCfg)
-	systemMasterCfg.Host += logicalcluster.NewPath(systemMasterPath).RequestPath()
-	systemMasterClient, err := client.New(systemMasterCfg, client.Options{Scheme: scheme})
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to add healthz check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to add readyz check")
+		os.Exit(1)
+	}
+
+	// Create RBAC manager targeting system:master workspace via the root shard.
+	rbacCfg := rest.CopyConfig(cfg)
+	if rootShardHost != "" {
+		rbacCfg.Host = rootShardHost
+	}
+	rbacCfg.Host += logicalcluster.NewPath(systemMasterPath).RequestPath()
+
+	systemMasterClient, err := client.New(rbacCfg, client.Options{Scheme: scheme})
 	if err != nil {
 		setupLog.Error(err, "unable to create system:master client")
 		os.Exit(1)
@@ -102,6 +125,19 @@ func main() {
 	// Register the multicluster DependencyRule reconciler.
 	reconciler := controller.NewDependencyRuleReconciler(mgr)
 	reconciler.RBACManager = rbacMgr
+
+	// Wire up webhook installer if configured.
+	if webhookURL != "" {
+		var caBundle []byte
+		if webhookCABundlePath != "" {
+			caBundle, err = os.ReadFile(webhookCABundlePath)
+			if err != nil {
+				setupLog.Error(err, "unable to read webhook CA bundle", "path", webhookCABundlePath)
+				os.Exit(1)
+			}
+		}
+		reconciler.WebhookInstaller = controller.NewWebhookInstaller(baseCfg, webhookURL, caBundle)
+	}
 
 	if err := mcbuilder.ControllerManagedBy(mgr).
 		Named("dependencyrule").

@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dependency-webhook.fullname" . }}
+  labels:
+    {{- include "dependency-webhook.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "dependency-webhook.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dependency-webhook.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "dependency-webhook.serviceAccountName" . }}
+      containers:
+        - name: webhook
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /dependency-webhook
+          args:
+            - --api-export-name={{ .Values.apiExportName }}
+            {{- if .Values.kcpBaseHost }}
+            - --kcp-base-host={{ .Values.kcpBaseHost }}
+            {{- end }}
+            - --webhook-port={{ .Values.webhookPort }}
+            - --tls-cert-dir={{ .Values.tlsCertDir }}
+            - --health-probe-bind-address={{ .Values.healthProbeBindAddress }}
+          {{- if .Values.kubeconfig.secretName }}
+          env:
+            - name: KUBECONFIG
+              value: /etc/kcp-kubeconfig/{{ .Values.kubeconfig.key }}
+          {{- end }}
+          ports:
+            - containerPort: {{ .Values.webhookPort }}
+              name: https
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+          volumeMounts:
+            - name: tls
+              mountPath: {{ .Values.tlsCertDir }}
+              readOnly: true
+            {{- if .Values.kubeconfig.secretName }}
+            - name: kcp-kubeconfig
+              mountPath: /etc/kcp-kubeconfig
+              readOnly: true
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "dependency-webhook.tlsSecretName" . }}
+        {{- if .Values.kubeconfig.secretName }}
+        - name: kcp-kubeconfig
+          secret:
+            secretName: {{ .Values.kubeconfig.secretName }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

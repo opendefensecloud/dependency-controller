@@ -32,7 +32,10 @@ GOLANGCI_LINT_VERSION ?= v2.10.1
 ADDLICENSE_VERSION ?= v1.1.1
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
 
-CONTROLLER_IMG ?= dependency-controller:latest
+IMG_REGISTRY ?= ghcr.io/opendefense
+IMG_TAG ?= latest
+CONTROLLER_IMG ?= $(IMG_REGISTRY)/dependency-controller:$(IMG_TAG)
+WEBHOOK_IMG ?= $(IMG_REGISTRY)/dependency-controller:$(IMG_TAG)
 
 TIMESTAMP := $(shell date '+%Y%m%d%H%M%S')
 DEV_TAG ?= dev.$(TIMESTAMP)
@@ -57,6 +60,9 @@ generate: controller-gen ## Generate deepcopy methods.
 manifests: controller-gen apigen ## Generate CRDs and convert to kcp APIResourceSchemas + APIExport.
 	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:dir=config/crds
 	$(APIGEN) --input-dir=config/crds --output-dir=config/kcp
+	cp config/crds/* charts/dependency-controller/files/
+	cp config/kcp/apiresourceschema-*.yaml charts/dependency-controller/files/
+	cp config/kcp/apiexport-*.yaml charts/dependency-controller/files/
 
 .PHONY: fmt
 fmt: addlicense golangci-lint ## Add license headers and format code.
@@ -95,11 +101,16 @@ run-webhook: generate ## Run the webhook server from source.
 
 .PHONY: docker-build
 docker-build: ## Build the Docker image.
-	$(DOCKER) build -t $(CONTROLLER_IMG) .
+	$(DOCKER) build --platform linux/amd64,linux/arm64 -t $(CONTROLLER_IMG) .
 
 .PHONY: docker-push
 docker-push: ## Push the Docker image.
 	$(DOCKER) push $(CONTROLLER_IMG)
+
+.PHONY: helm-package
+helm-package: manifests ## Package Helm charts.
+	helm package charts/dependency-controller
+	helm package charts/dependency-webhook
 
 ##@ Testing
 
@@ -114,6 +125,14 @@ test-unit: generate ## Run unit tests only (no e2e).
 .PHONY: test-e2e
 test-e2e: generate ginkgo kcp ## Run e2e tests against a local kcp instance.
 	TEST_KCP_ASSETS=$(LOCALBIN) $(GINKGO) -r --fail-fast -v ./test/e2e/ $(testargs)
+
+.PHONY: test-integration
+test-integration: ## Run integration tests (kind + kcp + helm).
+	./test/integration/run.sh
+
+.PHONY: integration-cleanup
+integration-cleanup: ## Remove kind cluster from integration tests.
+	-$(KIND) delete cluster --name dep-ctrl-integration 2>/dev/null
 
 ##@ Tool Dependencies
 

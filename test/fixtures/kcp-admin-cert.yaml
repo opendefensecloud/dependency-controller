@@ -1,0 +1,19 @@
+# Certificate for kcp admin client credentials, issued by the kcp front-proxy CA.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kcp-admin-client-cert
+  namespace: kcp-system
+spec:
+  commonName: kcp-admin
+  issuerRef:
+    name: kcp-front-proxy-client-issuer
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  secretName: kcp-admin-client-cert
+  subject:
+    organizations:
+      - "system:kcp:admin"
+  usages:
+    - client auth

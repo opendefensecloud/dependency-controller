@@ -10,6 +10,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -42,9 +43,13 @@ func main() {
 	var apiExportName string
 	var kcpBaseHost string
 	var webhookPort int
+	var tlsCertDir string
+	var healthProbeBindAddress string
 	flag.StringVar(&apiExportName, "api-export-name", "dependencies.opendefense.cloud", "Name of the dependency-controller's APIExport")
 	flag.StringVar(&kcpBaseHost, "kcp-base-host", "", "Base kcp host URL (without workspace path). If empty, derived from kubeconfig.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port for the webhook server")
+	flag.StringVar(&tlsCertDir, "tls-cert-dir", "/etc/webhook-tls", "Directory containing tls.crt and tls.key for the webhook server")
+	flag.StringVar(&healthProbeBindAddress, "health-probe-bind-address", ":8081", "Address to bind the health probe endpoint")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -70,11 +75,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	webhookOpts := ctrlwebhook.Options{
+		Port:    webhookPort,
+		CertDir: tlsCertDir,
+	}
+
 	mgr, err := mcmanager.New(cfg, depCtrlProvider, manager.Options{
-		Scheme: scheme,
-		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
-			Port: webhookPort,
-		}),
+		Scheme:                 scheme,
+		HealthProbeBindAddress: healthProbeBindAddress,
+		WebhookServer:          ctrlwebhook.NewServer(webhookOpts),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")
@@ -115,7 +124,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Readyz endpoint reports healthy only after the registry is populated.
+	// Healthz always returns OK; readyz only after the registry is populated.
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to add healthz check")
+		os.Exit(1)
+	}
 	if err := mgr.AddReadyzCheck("registry-populated", webhook.ReadyzCheck(initialized)); err != nil {
 		setupLog.Error(err, "unable to add readyz check")
 		os.Exit(1)

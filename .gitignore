@@ -1,2 +1,4 @@
 /.devenv/
 /bin/
+charts/*/files/
+*.tgz

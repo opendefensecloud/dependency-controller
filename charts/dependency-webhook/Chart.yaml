@@ -1,0 +1,6 @@
+apiVersion: v2
+name: dependency-webhook
+description: Dependency webhook for kcp — validates deletion requests against indexed dependency caches.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
