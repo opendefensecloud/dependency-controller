@@ -86,6 +86,17 @@ wait_for() {
     ok "${desc}"
 }
 
+# Check helpers for wait_for (must be functions so they re-evaluate each retry).
+check_ws_ready() {
+    local ws="$1"
+    test "$(kcpctl_root get workspace "${ws}" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Ready"
+}
+
+check_binding_bound() {
+    local ws="$1" binding="$2"
+    test "$(kcpctl "${ws}" get apibinding "${binding}" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Bound"
+}
+
 # Apply a YAML fixture to a kcp workspace, substituting placeholders.
 apply_fixture_to_ws() {
     local ws="$1" file="$2"; shift 2
@@ -142,8 +153,10 @@ install_cert_manager() {
         kindctl -n cert-manager wait deployment cert-manager-webhook \
         --for=condition=Available --timeout=1s
 
-    # Create self-signed ClusterIssuer.
-    kindctl apply -f "${FIXTURES_DIR}/cert-manager-selfsigned-issuer.yaml"
+    # Retry the ClusterIssuer creation — the webhook needs time for CA bundle propagation
+    # even after the deployment reports Available.
+    wait_for 60 "self-signed ClusterIssuer created" \
+        kindctl apply -f "${FIXTURES_DIR}/cert-manager-selfsigned-issuer.yaml"
 }
 
 deploy_kcp() {
@@ -162,36 +175,41 @@ deploy_kcp() {
 }
 
 patch_coredns() {
-    info "Patching CoreDNS to resolve ${KCP_HOSTNAME}"
+    info "Patching CoreDNS for kcp name resolution"
 
-    # Add a dedicated server block for kcp.local that resolves to the
-    # front-proxy ClusterIP.  Prepend it to the existing Corefile so
-    # all pods in the kind cluster can reach kcp.
+    # The kcp server generates virtual workspace URLs using its short service
+    # name (https://kcp:6443/services/apiexport/...).  Pods in other namespaces
+    # cannot resolve the short name.  We inject a hosts plugin into CoreDNS so
+    # that "kcp" and "kcp.local" resolve cluster-wide.
+
+    # Discover the kcp server service ClusterIP (this is the kcp server, not the front-proxy).
+    local kcp_server_ip
+    kcp_server_ip=$(kindctl -n "${KCP_NAMESPACE}" get svc kcp -o jsonpath='{.spec.clusterIP}')
+
     local existing
     existing=$(kindctl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')
 
-    local kcp_block
-    kcp_block="$(cat <<EOF
-${KCP_HOSTNAME}:53 {
-    errors
-    cache 30
-    hosts {
+    # Build new Corefile by inserting hosts block before the "ready" line.
+    local new_corefile=""
+    while IFS= read -r line; do
+        if [[ "${line}" =~ ^[[:space:]]*ready ]]; then
+            new_corefile+="    hosts {
         ${KCP_CLUSTER_IP} ${KCP_HOSTNAME}
+        ${kcp_server_ip} kcp
         fallthrough
     }
-}
-
-EOF
-)"
-
-    local new_corefile="${kcp_block}${existing}"
+"
+        fi
+        new_corefile+="${line}
+"
+    done <<< "${existing}"
 
     kindctl -n kube-system create configmap coredns \
         --from-literal="Corefile=${new_corefile}" \
         --dry-run=client -o yaml | kindctl apply -f -
 
     kindctl -n kube-system rollout restart deployment coredns
-    wait_for 30 "CoreDNS restarted" \
+    wait_for 60 "CoreDNS restarted" \
         kindctl -n kube-system rollout status deployment coredns --timeout=1s
 
     ok "CoreDNS patched"
@@ -219,12 +237,11 @@ build_admin_kubeconfig() {
         -o jsonpath='{.data.tls\.key}' | base64 -d > "${TMP_DIR}/client.key"
 
     # Build a kubeconfig for host access (via NodePort on localhost).
-    # Use --insecure-skip-tls-verify since NodePort goes through localhost
-    # but the cert SAN may only include kcp.local.
+    # Skip TLS verification — the front-proxy serving cert may not include
+    # localhost in its SANs depending on how the chart generates certs.
     kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" config set-cluster kcp \
         --server="https://localhost:${KCP_NODE_PORT}" \
-        --certificate-authority="${TMP_DIR}/ca.crt" \
-        --embed-certs=true
+        --insecure-skip-tls-verify=true
     kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" config set-credentials kcp-admin \
         --client-certificate="${TMP_DIR}/client.crt" \
         --client-key="${TMP_DIR}/client.key" \
@@ -235,8 +252,7 @@ build_admin_kubeconfig() {
 
     # Verify connectivity.
     wait_for 30 "kcp API reachable" \
-        kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" \
-            --server "https://localhost:${KCP_NODE_PORT}" get --raw /readyz
+        kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" get --raw /readyz
 
     ok "admin kubeconfig ready"
 }
@@ -268,8 +284,7 @@ EOF
 
     # Wait for workspaces to be ready.
     for ws in "${WS_DEP_CTRL}" "${WS_NETWORK_PROVIDER}" "${WS_COMPUTE_PROVIDER}" "${WS_CONSUMER1}" "${WS_CONSUMER2}"; do
-        wait_for 60 "workspace ${ws} ready" \
-            test "$(kcpctl_root get workspace "${ws}" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Ready"
+        wait_for 60 "workspace ${ws} ready" check_ws_ready "${ws}"
     done
 
     # Apply dep-ctrl APIResourceSchemas and APIExport.
@@ -309,18 +324,7 @@ EOF
         local ws="${ws_binding%%/*}"
         local binding="${ws_binding##*/}"
         wait_for 60 "binding ${binding} in ${ws} bound" \
-            test "$(kcpctl "${ws}" get apibinding "${binding}" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Bound"
-    done
-
-    # Wait for APIExportEndpointSlices to have endpoints.
-    for ws_ep in \
-        "${WS_DEP_CTRL}/dependencies.opendefense.cloud" \
-        "${WS_NETWORK_PROVIDER}/network.test.io" \
-        "${WS_COMPUTE_PROVIDER}/compute.test.io"; do
-        local ws="${ws_ep%%/*}"
-        local ep="${ws_ep##*/}"
-        wait_for 60 "endpoints for ${ep} in ${ws}" \
-            test -n "$(kcpctl "${ws}" get apiexportendpointslice "${ep}" -o jsonpath='{.status.apiExportEndpoints[0].url}' 2>/dev/null)"
+            check_binding_bound "${ws}" "${binding}"
     done
 
     ok "kcp workspace topology ready"

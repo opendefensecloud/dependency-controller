@@ -9,6 +9,7 @@ certificates:
     - kcp.local
 
 etcd:
+  replicas: 1
   resources:
     requests:
       memory: 256Mi
