@@ -1,12 +1,12 @@
 # Values for integration testing — kcp deployed in kind via helm chart.
-# Uses a fixed clusterIP + CoreDNS entry so pods resolve kcp.local to the front-proxy.
-externalHostname: "kcp.local"
+externalHostname: "kcp-front-proxy.kcp-system.svc.cluster.local"
 externalPort: "8443"
 
 certificates:
   dnsNames:
     - localhost
-    - kcp.local
+    - kcp-front-proxy.kcp-system.svc.cluster.local
+    - kcp.kcp-system.svc.cluster.local
 
 etcd:
   replicas: 1
@@ -20,12 +20,8 @@ etcd:
 
 kcp:
   volumeClassName: standard
-  hostAliases:
-    enabled: true
-    values:
-      - ip: "10.96.100.1"
-        hostnames:
-          - "kcp.local"
+  extraFlags:
+    - "--shard-base-url=https://kcp.kcp-system.svc.cluster.local:6443"
   resources:
     requests:
       memory: 512Mi
@@ -37,4 +33,3 @@ kcpFrontProxy:
   service:
     type: NodePort
     nodePort: 31500
-    clusterIP: "10.96.100.1"

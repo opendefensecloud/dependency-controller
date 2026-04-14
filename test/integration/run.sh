@@ -27,11 +27,7 @@ CERT_MANAGER_VERSION="v1.17.2"
 
 # kcp helm chart configuration.
 KCP_NAMESPACE="kcp-system"
-KCP_HOSTNAME="kcp.local"
-KCP_CLUSTER_IP="10.96.100.1"
 KCP_NODE_PORT="31500"
-KCP_EXTERNAL_PORT="8443"
-
 # Temp directory for kubeconfigs and certs.
 TMP_DIR=""
 
@@ -89,7 +85,10 @@ wait_for() {
 # Check helpers for wait_for (must be functions so they re-evaluate each retry).
 check_ws_ready() {
     local ws="$1"
-    test "$(kcpctl_root get workspace "${ws}" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Ready"
+    local phase
+    phase="$(kcpctl_root get workspace "${ws}" -o jsonpath='{.status.phase}' 2>&1)" || true
+    echo "    workspace ${ws} phase: ${phase}"
+    test "${phase}" = "Ready"
 }
 
 check_binding_bound() {
@@ -174,87 +173,64 @@ deploy_kcp() {
     ok "kcp deployed"
 }
 
-patch_coredns() {
-    info "Patching CoreDNS for kcp name resolution"
-
-    # The kcp server generates virtual workspace URLs using its short service
-    # name (https://kcp:6443/services/apiexport/...).  Pods in other namespaces
-    # cannot resolve the short name.  We inject a hosts plugin into CoreDNS so
-    # that "kcp" and "kcp.local" resolve cluster-wide.
-
-    # Discover the kcp server service ClusterIP (this is the kcp server, not the front-proxy).
-    local kcp_server_ip
-    kcp_server_ip=$(kindctl -n "${KCP_NAMESPACE}" get svc kcp -o jsonpath='{.spec.clusterIP}')
-
-    local existing
-    existing=$(kindctl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}')
-
-    # Build new Corefile by inserting hosts block before the "ready" line.
-    local new_corefile=""
-    while IFS= read -r line; do
-        if [[ "${line}" =~ ^[[:space:]]*ready ]]; then
-            new_corefile+="    hosts {
-        ${KCP_CLUSTER_IP} ${KCP_HOSTNAME}
-        ${kcp_server_ip} kcp
-        fallthrough
-    }
-"
-        fi
-        new_corefile+="${line}
-"
-    done <<< "${existing}"
-
-    kindctl -n kube-system create configmap coredns \
-        --from-literal="Corefile=${new_corefile}" \
-        --dry-run=client -o yaml | kindctl apply -f -
-
-    kindctl -n kube-system rollout restart deployment coredns
-    wait_for 60 "CoreDNS restarted" \
-        kindctl -n kube-system rollout status deployment coredns --timeout=1s
-
-    ok "CoreDNS patched"
-}
-
-build_admin_kubeconfig() {
-    info "Building kcp admin kubeconfig"
+build_admin_kubeconfigs() {
+    info "Building kcp admin kubeconfigs"
 
     TMP_DIR="$(mktemp -d)"
     KCP_HOST_KUBECONFIG="${TMP_DIR}/kcp-host.kubeconfig"
 
-    # Issue an admin client certificate via cert-manager.
+    # Issue admin client certificates for both front-proxy and kcp server.
     kindctl apply -f "${FIXTURES_DIR}/kcp-admin-cert.yaml"
-    wait_for 60 "admin client cert issued" \
-        kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-client-cert -o jsonpath='{.data.tls\.crt}'
+    wait_for 60 "front-proxy admin cert issued" \
+        kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-front-proxy-cert -o jsonpath='{.data.tls\.crt}'
+    wait_for 60 "kcp server admin cert issued" \
+        kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-server-cert -o jsonpath='{.data.tls\.crt}'
 
-    # Extract the front-proxy CA certificate.
-    kindctl -n "${KCP_NAMESPACE}" get secret kcp-front-proxy-cert \
-        -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/ca.crt"
+    # --- Host kubeconfig (front-proxy via NodePort) ---
+    kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-front-proxy-cert \
+        -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/fp-client.crt"
+    kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-front-proxy-cert \
+        -o jsonpath='{.data.tls\.key}' | base64 -d > "${TMP_DIR}/fp-client.key"
 
-    # Extract admin client certificate and key.
-    kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-client-cert \
-        -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/client.crt"
-    kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-client-cert \
-        -o jsonpath='{.data.tls\.key}' | base64 -d > "${TMP_DIR}/client.key"
-
-    # Build a kubeconfig for host access (via NodePort on localhost).
-    # Skip TLS verification — the front-proxy serving cert may not include
-    # localhost in its SANs depending on how the chart generates certs.
     kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" config set-cluster kcp \
         --server="https://localhost:${KCP_NODE_PORT}" \
         --insecure-skip-tls-verify=true
     kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" config set-credentials kcp-admin \
-        --client-certificate="${TMP_DIR}/client.crt" \
-        --client-key="${TMP_DIR}/client.key" \
+        --client-certificate="${TMP_DIR}/fp-client.crt" \
+        --client-key="${TMP_DIR}/fp-client.key" \
         --embed-certs=true
     kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" config set-context kcp \
         --cluster=kcp --user=kcp-admin
     kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" config use-context kcp
 
-    # Verify connectivity.
     wait_for 30 "kcp API reachable" \
         kubectl --kubeconfig "${KCP_HOST_KUBECONFIG}" get --raw /readyz
 
-    ok "admin kubeconfig ready"
+    # --- Pod kubeconfig (kcp server directly on kcp:6443) ---
+    # Virtual workspace URLs point to kcp:6443, so pods must authenticate
+    # to the kcp server (not the front-proxy). Use kcp-client-issuer certs
+    # and the kcp server CA.
+    kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-server-cert \
+        -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/srv-client.crt"
+    kindctl -n "${KCP_NAMESPACE}" get secret kcp-admin-server-cert \
+        -o jsonpath='{.data.tls\.key}' | base64 -d > "${TMP_DIR}/srv-client.key"
+    kindctl -n "${KCP_NAMESPACE}" get secret kcp-ca \
+        -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP_DIR}/kcp-server-ca.crt"
+
+    local internal_kubeconfig="${TMP_DIR}/kcp-internal.kubeconfig"
+    kubectl --kubeconfig "${internal_kubeconfig}" config set-cluster kcp \
+        --server="https://kcp.${KCP_NAMESPACE}.svc.cluster.local:6443/clusters/root:${WS_DEP_CTRL}" \
+        --certificate-authority="${TMP_DIR}/kcp-server-ca.crt" \
+        --embed-certs=true
+    kubectl --kubeconfig "${internal_kubeconfig}" config set-credentials kcp-admin \
+        --client-certificate="${TMP_DIR}/srv-client.crt" \
+        --client-key="${TMP_DIR}/srv-client.key" \
+        --embed-certs=true
+    kubectl --kubeconfig "${internal_kubeconfig}" config set-context kcp \
+        --cluster=kcp --user=kcp-admin
+    kubectl --kubeconfig "${internal_kubeconfig}" config use-context kcp
+
+    ok "admin kubeconfigs ready"
 }
 
 build_and_load_image() {
@@ -339,25 +315,10 @@ deploy_charts() {
 
     kindctl create namespace "${KIND_NAMESPACE}" 2>/dev/null || true
 
-    # Build a kubeconfig for pods that points to the in-cluster kcp front-proxy.
-    # Pods resolve kcp.local via the CoreDNS entry patched earlier.
-    local kcp_internal_server="https://${KCP_HOSTNAME}:${KCP_EXTERNAL_PORT}/clusters/root:${WS_DEP_CTRL}"
-
-    local internal_kubeconfig="${TMP_DIR}/kcp-internal.kubeconfig"
-    kubectl --kubeconfig "${internal_kubeconfig}" config set-cluster kcp \
-        --server="${kcp_internal_server}" \
-        --certificate-authority="${TMP_DIR}/ca.crt" \
-        --embed-certs=true
-    kubectl --kubeconfig "${internal_kubeconfig}" config set-credentials kcp-admin \
-        --client-certificate="${TMP_DIR}/client.crt" \
-        --client-key="${TMP_DIR}/client.key" \
-        --embed-certs=true
-    kubectl --kubeconfig "${internal_kubeconfig}" config set-context kcp \
-        --cluster=kcp --user=kcp-admin
-    kubectl --kubeconfig "${internal_kubeconfig}" config use-context kcp
-
+    # The internal kubeconfig was built in build_admin_kubeconfigs() and points
+    # to kcp:6443 with kcp-client-issuer certs (needed for virtual workspace access).
     kindctl -n "${KIND_NAMESPACE}" create secret generic kcp-kubeconfig \
-        --from-file=kubeconfig="${internal_kubeconfig}" \
+        --from-file=kubeconfig="${TMP_DIR}/kcp-internal.kubeconfig" \
         --dry-run=client -o yaml | kindctl apply -f -
 
     info "Deploying webhook chart"
@@ -510,8 +471,7 @@ main() {
     create_kind_cluster
     install_cert_manager
     deploy_kcp
-    patch_coredns
-    build_admin_kubeconfig
+    build_admin_kubeconfigs
     build_and_load_image
     setup_kcp_workspaces
     deploy_charts

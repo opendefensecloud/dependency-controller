@@ -5,7 +5,9 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+COPY api/ api/
+COPY cmd/ cmd/
+COPY internal/ internal/
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64

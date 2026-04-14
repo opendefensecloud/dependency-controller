@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/multicluster-provider/apiexport"
@@ -259,7 +260,9 @@ func (w *DependencyRuleWatcher) createExportManager(ctx context.Context, ref v1a
 	}
 
 	mgr, err := mcmanager.New(cfg, provider, manager.Options{
-		Scheme: w.Scheme,
+		Scheme:                 w.Scheme,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating multicluster manager: %w", err)

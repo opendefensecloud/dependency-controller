@@ -1,4 +1,4 @@
-# Values for integration testing — controller deployed in kind, connecting to kcp in-cluster.
+# Values for integration testing — controller deployed in kind, connecting to kcp server directly.
 image:
   repository: dependency-controller
   tag: integration-test
@@ -8,8 +8,8 @@ kubeconfig:
   secretName: kcp-kubeconfig
   key: kubeconfig
 
-kcpBaseHost: "https://kcp.local:8443"
-rootShardHost: "https://kcp.local:8443"
+kcpBaseHost: "https://kcp.kcp-system.svc.cluster.local:6443"
+rootShardHost: "https://kcp.kcp-system.svc.cluster.local:6443"
 
 webhook:
   url: https://dep-webhook-dependency-webhook.dependency-system.svc.cluster.local/validate
