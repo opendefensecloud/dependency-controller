@@ -1,0 +1,9 @@
+apiVersion: compute.test.io/v1
+kind: VirtualMachine
+metadata:
+  name: my-vm
+  namespace: default
+spec:
+  cpu: 4
+  vpcRef:
+    name: my-vpc

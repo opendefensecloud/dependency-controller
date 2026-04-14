@@ -1,0 +1,7 @@
+apiVersion: network.test.io/v1
+kind: VPC
+metadata:
+  name: my-vpc
+  namespace: default
+spec:
+  cidr: "10.0.0.0/16"

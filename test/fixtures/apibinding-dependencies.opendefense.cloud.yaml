@@ -1,0 +1,9 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: dependencies.opendefense.cloud
+spec:
+  reference:
+    export:
+      path: ${DEP_CTRL_PATH}
+      name: dependencies.opendefense.cloud

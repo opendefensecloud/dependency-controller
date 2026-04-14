@@ -16,6 +16,8 @@ import (
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 
+	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
@@ -37,8 +39,85 @@ type DependencyRuleWatcher struct {
 	// Scheme is the runtime scheme used when creating dynamic managers.
 	Scheme *runtime.Scheme
 
+	// APIExportName is the name of the dep-ctrl APIExport (and its
+	// APIExportEndpointSlice), used to resolve the virtual workspace URL
+	// during initial registry population.
+	APIExportName string
+
 	// Registry holds the rule state queried by the DeletionValidator.
 	Registry *RuleRegistry
+}
+
+// PopulateRegistry performs an initial population of the rule registry by
+// listing all existing DependencyRules from the APIExport virtual workspace.
+// It resolves the VW URL from the APIExportEndpointSlice, creates a client
+// for the wildcard cluster path, and processes every rule found.
+//
+// This must be called after the manager has started (e.g., from a
+// manager.Runnable) so that the APIExportEndpointSlice is available.
+func (w *DependencyRuleWatcher) PopulateRegistry(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithName("rule-watcher")
+
+	vwClient, err := w.virtualWorkspaceClient(ctx)
+	if err != nil {
+		return fmt.Errorf("creating virtual workspace client: %w", err)
+	}
+
+	var ruleList v1alpha1.DependencyRuleList
+	if err := vwClient.List(ctx, &ruleList); err != nil {
+		return fmt.Errorf("listing initial DependencyRules: %w", err)
+	}
+
+	logger.Info("populating rule registry", "ruleCount", len(ruleList.Items))
+
+	for i := range ruleList.Items {
+		rule := &ruleList.Items[i]
+		clusterName := logicalcluster.From(rule)
+		key := ruleStateKey(clusterName.String(), rule.Name)
+		if err := w.ensureWatcher(ctx, key, rule); err != nil {
+			return fmt.Errorf("populating rule %s/%s: %w", clusterName, rule.Name, err)
+		}
+	}
+
+	logger.Info("rule registry populated")
+	return nil
+}
+
+// virtualWorkspaceClient reads the APIExportEndpointSlice from the dep-ctrl
+// workspace to discover the virtual workspace URL, then returns a client
+// pointing at {vwURL}/clusters/* so it can list resources across all bound
+// workspaces.
+func (w *DependencyRuleWatcher) virtualWorkspaceClient(ctx context.Context) (client.Client, error) {
+	// Use a direct (non-cached) client to read the APIExportEndpointSlice
+	// from the dep-ctrl workspace.
+	localCfg := w.DepCtrlManager.GetLocalManager().GetConfig()
+	directClient, err := client.New(localCfg, client.Options{Scheme: w.Scheme})
+	if err != nil {
+		return nil, fmt.Errorf("creating direct client: %w", err)
+	}
+
+	var ess apisv1alpha1.APIExportEndpointSlice
+	if err := directClient.Get(ctx, client.ObjectKey{Name: w.APIExportName}, &ess); err != nil {
+		return nil, fmt.Errorf("getting APIExportEndpointSlice %s: %w", w.APIExportName, err)
+	}
+
+	if len(ess.Status.APIExportEndpoints) == 0 {
+		return nil, fmt.Errorf("APIExportEndpointSlice %s has no endpoints", w.APIExportName)
+	}
+
+	vwURL := ess.Status.APIExportEndpoints[0].URL
+
+	// Create a client for the wildcard cluster path to list across all
+	// logical clusters visible through the virtual workspace.
+	vwCfg := rest.CopyConfig(localCfg)
+	vwCfg.Host = vwURL + "/clusters/*"
+
+	vwClient, err := client.New(vwCfg, client.Options{Scheme: w.Scheme})
+	if err != nil {
+		return nil, fmt.Errorf("creating VW client: %w", err)
+	}
+
+	return vwClient, nil
 }
 
 // Reconcile handles DependencyRule events. On creation/update it ensures a

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -87,6 +88,7 @@ func main() {
 		DepCtrlManager: mgr,
 		BaseConfig:     baseCfg,
 		Scheme:         scheme,
+		APIExportName:  apiExportName,
 		Registry:       registry,
 	}
 
@@ -98,9 +100,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Populate the registry before serving webhook requests. The runnable
+	// executes after the manager starts and lists all existing DependencyRules
+	// from the APIExport virtual workspace.
+	initialized := make(chan struct{})
+	if err := mgr.GetLocalManager().Add(manager.RunnableFunc(func(ctx context.Context) error {
+		if err := watcher.PopulateRegistry(ctx); err != nil {
+			return err
+		}
+		close(initialized)
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to add registry population runnable")
+		os.Exit(1)
+	}
+
+	// Readyz endpoint reports healthy only after the registry is populated.
+	if err := mgr.AddReadyzCheck("registry-populated", webhook.ReadyzCheck(initialized)); err != nil {
+		setupLog.Error(err, "unable to add readyz check")
+		os.Exit(1)
+	}
+
 	// Register webhook handler.
 	validator := &webhook.DeletionValidator{
-		Registry: registry,
+		Registry:    registry,
+		Initialized: initialized,
 	}
 	mgr.GetWebhookServer().Register("/validate", &ctrlwebhook.Admission{Handler: validator})
 

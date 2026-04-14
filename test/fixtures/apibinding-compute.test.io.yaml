@@ -1,0 +1,9 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: compute.test.io
+spec:
+  reference:
+    export:
+      path: ${COMPUTE_PROVIDER_PATH}
+      name: compute.test.io

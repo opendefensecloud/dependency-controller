@@ -22,6 +22,19 @@ const (
 	AnnotationSkipProtection = "dependencies.opendefense.cloud/skip-protection"
 )
 
+// ReadyzCheck returns a healthz.Checker that reports healthy once the given
+// channel is closed (i.e., the rule registry has been populated).
+func ReadyzCheck(initialized <-chan struct{}) func(*http.Request) error {
+	return func(_ *http.Request) error {
+		select {
+		case <-initialized:
+			return nil
+		default:
+			return fmt.Errorf("rule registry not yet populated")
+		}
+	}
+}
+
 // DeletionValidator is a validating admission webhook handler that blocks
 // deletion of resources that have active dependents referencing them.
 //
@@ -29,6 +42,11 @@ const (
 // per-rule multicluster managers. No Dependency marker objects are needed.
 type DeletionValidator struct {
 	Registry *RuleRegistry
+
+	// Initialized is closed once the rule registry has been populated with
+	// all existing DependencyRules. Until then, DELETE requests are denied
+	// to prevent deletions slipping through before the registry is ready.
+	Initialized <-chan struct{}
 }
 
 func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) admission.Response {
@@ -36,6 +54,13 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 
 	if req.Operation != "DELETE" {
 		return admission.Allowed("")
+	}
+
+	// Block all DELETE requests until the registry has been populated.
+	select {
+	case <-v.Initialized:
+	default:
+		return admission.Denied("dependency webhook not yet initialized, retry later")
 	}
 
 	// Parse the object for skip-protection annotation and cluster extraction.

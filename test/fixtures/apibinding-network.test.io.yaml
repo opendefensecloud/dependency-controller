@@ -1,0 +1,9 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: network.test.io
+spec:
+  reference:
+    export:
+      path: ${NETWORK_PROVIDER_PATH}
+      name: network.test.io

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	registrationv1 "k8s.io/api/admissionregistration/v1"
@@ -63,6 +64,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		computeProvPath logicalcluster.Path
 		consumer1Path   logicalcluster.Path
 		consumer2Path   logicalcluster.Path
+		pathVars        map[string]string
 	)
 
 	BeforeAll(func() {
@@ -103,14 +105,21 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 
 		// === APIBindings ===
 
+		pathVars = map[string]string{
+			"${DEP_CTRL_PATH}":         depCtrlPath.String(),
+			"${NETWORK_PROVIDER_PATH}": networkProvPath.String(),
+			"${COMPUTE_PROVIDER_PATH}": computeProvPath.String(),
+		}
+
 		// Both providers bind to dep-ctrl.
-		createBinding(ctx, cli, computeProvPath, "dependencies.opendefense.cloud", depCtrlPath)
-		createBinding(ctx, cli, networkProvPath, "dependencies.opendefense.cloud", depCtrlPath)
+		for _, wsPath := range []logicalcluster.Path{computeProvPath, networkProvPath} {
+			applyFixture(ctx, cli, wsPath, "../fixtures/apibinding-dependencies.opendefense.cloud.yaml", pathVars)
+		}
 
 		// Consumer workspaces bind to network and compute exports.
 		for _, cp := range []logicalcluster.Path{consumer1Path, consumer2Path} {
-			createBinding(ctx, cli, cp, "network.test.io", networkProvPath)
-			createBinding(ctx, cli, cp, "compute.test.io", computeProvPath)
+			applyFixture(ctx, cli, cp, "../fixtures/apibinding-network.test.io.yaml", pathVars)
+			applyFixture(ctx, cli, cp, "../fixtures/apibinding-compute.test.io.yaml", pathVars)
 		}
 
 		// === Wait for all APIExportEndpointSlices to have endpoints ===
@@ -187,6 +196,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			DepCtrlManager: mgr,
 			BaseConfig:     kcpConfig,
 			Scheme:         scheme.Scheme,
+			APIExportName:  "dependencies.opendefense.cloud",
 			Registry:       registry,
 		}
 
@@ -194,6 +204,17 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			Named("dependencyrule-watcher").
 			For(&v1alpha1.DependencyRule{}).
 			Complete(mcreconcile.Func(ruleWatcher.Reconcile))
+		Expect(err).NotTo(HaveOccurred())
+
+		// Populate the registry before serving webhook requests.
+		initialized := make(chan struct{})
+		err = mgr.GetLocalManager().Add(manager.RunnableFunc(func(ctx context.Context) error {
+			if err := ruleWatcher.PopulateRegistry(ctx); err != nil {
+				return err
+			}
+			close(initialized)
+			return nil
+		}))
 		Expect(err).NotTo(HaveOccurred())
 
 		// Create the controller-side reconciler (webhook install only, no RBAC in e2e).
@@ -209,13 +230,23 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Wire up the webhook handler with the rule registry.
-		webhookHandler = &depwebhook.DeletionValidator{Registry: registry}
+		webhookHandler = &depwebhook.DeletionValidator{Registry: registry, Initialized: initialized}
 
 		// Start the manager.
 		go func() {
 			defer GinkgoRecover()
 			Expect(mgr.Start(ctx)).To(Succeed())
 		}()
+
+		// Wait for the rule registry to be populated before running tests.
+		Eventually(func() bool {
+			select {
+			case <-initialized:
+				return true
+			default:
+				return false
+			}
+		}, wait.ForeverTestTimeout, 100*time.Millisecond).Should(BeTrue(), "waiting for rule registry to be initialized")
 	})
 
 	AfterAll(func() {
@@ -225,90 +256,53 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 	Describe("dependency lifecycle", func() {
 		It("should block VPC deletion when a VM references it", func() {
 			By("creating a VPC in consumer1")
-			vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
-			setNestedField(vpc, "10.0.0.0/16", "spec", "cidr")
-			Expect(cli.Cluster(consumer1Path).Create(ctx, vpc)).To(Succeed())
+			applyFixture(ctx, cli, consumer1Path, "../fixtures/vpc-my-vpc.yaml", nil)
 
 			By("creating a DependencyRule in the compute-provider workspace")
-			rule := &v1alpha1.DependencyRule{
-				ObjectMeta: metav1.ObjectMeta{Name: "vm-dependencies"},
-				Spec: v1alpha1.DependencyRuleSpec{
-					Dependent: v1alpha1.DependentRef{
-						APIExportRef: v1alpha1.APIExportReference{
-							Path: computeProvPath.String(),
-							Name: "compute.test.io",
-						},
-						Group:    "compute.test.io",
-						Version:  "v1",
-						Kind:     "VirtualMachine",
-						Resource: "virtualmachines",
-					},
-					Dependencies: []v1alpha1.DependencyTarget{
-						{
-							APIExportRef: v1alpha1.APIExportReference{
-								Path: networkProvPath.String(),
-								Name: "network.test.io",
-							},
-							Group:    "network.test.io",
-							Version:  "v1",
-							Resource: "vpcs",
-							FieldRef: v1alpha1.FieldReference{Path: ".spec.vpcRef.name"},
-						},
-					},
-				},
-			}
-			Expect(cli.Cluster(computeProvPath).Create(ctx, rule)).To(Succeed())
+			applyFixture(ctx, cli, computeProvPath, "../fixtures/dependencyrule-vm-dependencies.yaml", pathVars)
 
 			By("creating a VM that references the VPC in consumer1")
-			vm := newUnstructured("compute.test.io", "v1", "VirtualMachine", "my-vm", "default")
-			setNestedField(vm, "my-vpc", "spec", "vpcRef", "name")
-			setNestedField(vm, int64(4), "spec", "cpu")
-			Expect(cli.Cluster(consumer1Path).Create(ctx, vm)).To(Succeed())
+			applyFixture(ctx, cli, consumer1Path, "../fixtures/vm-my-vm.yaml", nil)
 
 			By("waiting for the webhook to block VPC deletion")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				vpcToDelete := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
+				vpcToDelete := loadFixture("../fixtures/vpc-my-vpc.yaml", nil)
 				err := cli.Cluster(consumer1Path).Delete(ctx, vpcToDelete)
 				if err == nil {
 					// The indexed cache hadn't synced the VM yet — recreate the VPC and retry.
-					recreated := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
-					setNestedField(recreated, "10.0.0.0/16", "spec", "cidr")
-					_ = cli.Cluster(consumer1Path).Create(ctx, recreated)
+					_ = cli.Cluster(consumer1Path).Create(ctx, loadFixture("../fixtures/vpc-my-vpc.yaml", nil))
 					return false, "deletion was not blocked, recreated VPC"
 				}
 				if apierrors.IsNotFound(err) {
 					// VPC was deleted before webhook caught it — recreate and retry.
-					recreated := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
-					setNestedField(recreated, "10.0.0.0/16", "spec", "cidr")
-					_ = cli.Cluster(consumer1Path).Create(ctx, recreated)
+					_ = cli.Cluster(consumer1Path).Create(ctx, loadFixture("../fixtures/vpc-my-vpc.yaml", nil))
 					return false, "VPC not found, recreated"
 				}
 				if !apierrors.IsForbidden(err) {
 					return false, fmt.Sprintf("unexpected error: %v", err)
 				}
-				return true, ""
+				if strings.Contains(err.Error(), "still referenced by") {
+					return true, ""
+				}
+				return false, fmt.Sprintf("forbidden but not a dependency block: %v", err)
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook to block deletion")
 		})
 
 		It("should not affect consumer2 where there are no VMs", func() {
 			By("creating a VPC in consumer2")
-			vpc := newUnstructured("network.test.io", "v1", "VPC", "isolated-vpc", "default")
-			setNestedField(vpc, "10.2.0.0/16", "spec", "cidr")
-			Expect(cli.Cluster(consumer2Path).Create(ctx, vpc)).To(Succeed())
+			applyFixture(ctx, cli, consumer2Path, "../fixtures/vpc-isolated-vpc.yaml", nil)
 
 			By("deleting the VPC in consumer2 — should succeed (no dependents)")
-			Expect(cli.Cluster(consumer2Path).Delete(ctx, vpc)).To(Succeed())
+			Expect(cli.Cluster(consumer2Path).Delete(ctx, loadFixture("../fixtures/vpc-isolated-vpc.yaml", nil))).To(Succeed())
 		})
 
 		It("should allow VPC deletion after the dependent VM is deleted", func() {
 			By("deleting the VM in consumer1")
-			vm := newUnstructured("compute.test.io", "v1", "VirtualMachine", "my-vm", "default")
-			Expect(cli.Cluster(consumer1Path).Delete(ctx, vm)).To(Succeed())
+			Expect(cli.Cluster(consumer1Path).Delete(ctx, loadFixture("../fixtures/vm-my-vm.yaml", nil))).To(Succeed())
 
 			By("waiting for VPC deletion to be allowed")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				vpc := newUnstructured("network.test.io", "v1", "VPC", "my-vpc", "default")
-				err := cli.Cluster(consumer1Path).Delete(ctx, vpc)
+				err := cli.Cluster(consumer1Path).Delete(ctx, loadFixture("../fixtures/vpc-my-vpc.yaml", nil))
 				if err != nil {
 					return false, fmt.Sprintf("deletion still blocked: %v", err)
 				}
@@ -318,40 +312,30 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 
 		It("should stop blocking after the DependencyRule is deleted", func() {
 			By("creating a new VPC in consumer1")
-			vpc := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
-			setNestedField(vpc, "10.1.0.0/16", "spec", "cidr")
-			Expect(cli.Cluster(consumer1Path).Create(ctx, vpc)).To(Succeed())
+			applyFixture(ctx, cli, consumer1Path, "../fixtures/vpc-cleanup-vpc.yaml", nil)
 
 			By("creating a VM referencing the VPC")
-			vm := newUnstructured("compute.test.io", "v1", "VirtualMachine", "cleanup-vm", "default")
-			setNestedField(vm, "cleanup-vpc", "spec", "vpcRef", "name")
-			setNestedField(vm, int64(2), "spec", "cpu")
-			Expect(cli.Cluster(consumer1Path).Create(ctx, vm)).To(Succeed())
+			applyFixture(ctx, cli, consumer1Path, "../fixtures/vm-cleanup-vm.yaml", nil)
 
 			By("waiting for the webhook to block VPC deletion")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
-				vpcToDelete := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
-				err := cli.Cluster(consumer1Path).Delete(ctx, vpcToDelete)
+				err := cli.Cluster(consumer1Path).Delete(ctx, loadFixture("../fixtures/vpc-cleanup-vpc.yaml", nil))
 				if err == nil {
-					recreated := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
-					setNestedField(recreated, "10.1.0.0/16", "spec", "cidr")
-					_ = cli.Cluster(consumer1Path).Create(ctx, recreated)
+					_ = cli.Cluster(consumer1Path).Create(ctx, loadFixture("../fixtures/vpc-cleanup-vpc.yaml", nil))
 					return false, "deletion was not blocked, recreated VPC"
 				}
 				if apierrors.IsNotFound(err) {
-					recreated := newUnstructured("network.test.io", "v1", "VPC", "cleanup-vpc", "default")
-					setNestedField(recreated, "10.1.0.0/16", "spec", "cidr")
-					_ = cli.Cluster(consumer1Path).Create(ctx, recreated)
+					_ = cli.Cluster(consumer1Path).Create(ctx, loadFixture("../fixtures/vpc-cleanup-vpc.yaml", nil))
 					return false, "VPC not found, recreated"
 				}
-				return true, ""
+				if apierrors.IsForbidden(err) && strings.Contains(err.Error(), "still referenced by") {
+					return true, ""
+				}
+				return false, fmt.Sprintf("unexpected error: %v", err)
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook to block deletion")
 
 			By("deleting the DependencyRule")
-			rule := &v1alpha1.DependencyRule{
-				ObjectMeta: metav1.ObjectMeta{Name: "vm-dependencies"},
-			}
-			Expect(cli.Cluster(computeProvPath).Delete(ctx, rule)).To(Succeed())
+			Expect(cli.Cluster(computeProvPath).Delete(ctx, loadFixture("../fixtures/dependencyrule-vm-dependencies.yaml", pathVars))).To(Succeed())
 
 			By("verifying the webhook is removed from the network provider workspace")
 			envtest.Eventually(GinkgoT(), func() (bool, string) {
@@ -373,7 +357,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook removal")
 
 			By("verifying VPC deletion now succeeds")
-			Expect(cli.Cluster(consumer1Path).Delete(ctx, vpc)).To(Succeed())
+			Expect(cli.Cluster(consumer1Path).Delete(ctx, loadFixture("../fixtures/vpc-cleanup-vpc.yaml", nil))).To(Succeed())
 		})
 	})
 })
@@ -464,22 +448,6 @@ func startWebhookServer(ctx context.Context) (caBundle []byte, url string) {
 	return caPEM, fmt.Sprintf("https://127.0.0.1:%d/validate-deletion", port)
 }
 
-// createBinding creates an APIBinding in the given workspace.
-func createBinding(ctx context.Context, cli clusterclient.ClusterClient, wsPath logicalcluster.Path, exportName string, exportPath logicalcluster.Path) {
-	binding := &apisv1alpha2.APIBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: exportName},
-		Spec: apisv1alpha2.APIBindingSpec{
-			Reference: apisv1alpha2.BindingReference{
-				Export: &apisv1alpha2.ExportBindingReference{
-					Path: exportPath.String(),
-					Name: exportName,
-				},
-			},
-		},
-	}
-	ExpectWithOffset(1, cli.Cluster(wsPath).Create(ctx, binding)).To(Succeed())
-}
-
 // waitForBinding waits until an APIBinding reaches the Bound phase.
 func waitForBinding(ctx context.Context, cli clusterclient.ClusterClient, wsPath logicalcluster.Path, bindingName string) {
 	envtest.Eventually(GinkgoT(), func() (bool, string) {
@@ -491,18 +459,6 @@ func waitForBinding(ctx context.Context, cli clusterclient.ClusterClient, wsPath
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for binding %s in %s", bindingName, wsPath)
 }
 
-func newUnstructured(group, version, kind, name, namespace string) *unstructured.Unstructured {
-	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(runtimeschema.GroupVersionKind{Group: group, Version: version, Kind: kind})
-	u.SetName(name)
-	u.SetNamespace(namespace)
-	return u
-}
-
-func setNestedField(u *unstructured.Unstructured, value interface{}, fields ...string) {
-	ExpectWithOffset(1, unstructured.SetNestedField(u.Object, value, fields...)).To(Succeed())
-}
-
 func toYAML(obj interface{}) string {
 	data, err := yaml.Marshal(obj)
 	if err != nil {
@@ -511,32 +467,57 @@ func toYAML(obj interface{}) string {
 	return string(data)
 }
 
-// applyFixtures reads YAML files (relative to the test file directory) and
-// creates each object in the given workspace. Supports APIResourceSchema and
-// APIExport types.
+// loadFixture reads a YAML fixture file, performs placeholder substitution
+// from the replacements map, and returns the object as an unstructured resource.
+// For typed resources (APIResourceSchema, APIExport, APIBinding, DependencyRule),
+// it unmarshals into the correct Go type first to ensure validation.
+func loadFixture(path string, replacements map[string]string) client.Object {
+	raw, err := os.ReadFile(path)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "reading fixture %s", path)
+
+	content := string(raw)
+	for k, v := range replacements {
+		content = strings.ReplaceAll(content, k, v)
+	}
+	data := []byte(content)
+
+	var meta metav1.TypeMeta
+	ExpectWithOffset(1, yaml.Unmarshal(data, &meta)).To(Succeed(), "parsing kind from %s", path)
+
+	switch meta.Kind {
+	case "APIResourceSchema":
+		o := &apisv1alpha1.APIResourceSchema{}
+		ExpectWithOffset(1, yaml.Unmarshal(data, o)).To(Succeed(), "unmarshaling %s", path)
+		return o
+	case "APIExport":
+		o := &apisv1alpha2.APIExport{}
+		ExpectWithOffset(1, yaml.Unmarshal(data, o)).To(Succeed(), "unmarshaling %s", path)
+		return o
+	case "APIBinding":
+		o := &apisv1alpha2.APIBinding{}
+		ExpectWithOffset(1, yaml.Unmarshal(data, o)).To(Succeed(), "unmarshaling %s", path)
+		return o
+	case "DependencyRule":
+		o := &v1alpha1.DependencyRule{}
+		ExpectWithOffset(1, yaml.Unmarshal(data, o)).To(Succeed(), "unmarshaling %s", path)
+		return o
+	default:
+		o := &unstructured.Unstructured{}
+		ExpectWithOffset(1, yaml.Unmarshal(data, &o.Object)).To(Succeed(), "unmarshaling %s", path)
+		return o
+	}
+}
+
+// applyFixture loads a YAML fixture with placeholder substitution and creates
+// it in the given workspace.
+func applyFixture(ctx context.Context, cli clusterclient.ClusterClient, wsPath logicalcluster.Path, path string, replacements map[string]string) {
+	obj := loadFixture(path, replacements)
+	ExpectWithOffset(1, cli.Cluster(wsPath).Create(ctx, obj)).To(Succeed(), "creating fixture %s in %s", path, wsPath)
+}
+
+// applyFixtures loads multiple YAML fixtures and creates them in the given workspace.
 func applyFixtures(ctx context.Context, cli clusterclient.ClusterClient, wsPath logicalcluster.Path, paths ...string) {
 	for _, p := range paths {
-		raw, err := os.ReadFile(p)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "reading fixture %s", p)
-
-		// Peek at the kind to decide which type to unmarshal into.
-		var meta metav1.TypeMeta
-		ExpectWithOffset(1, yaml.Unmarshal(raw, &meta)).To(Succeed(), "parsing kind from %s", p)
-
-		var obj client.Object
-		switch meta.Kind {
-		case "APIResourceSchema":
-			o := &apisv1alpha1.APIResourceSchema{}
-			ExpectWithOffset(1, yaml.Unmarshal(raw, o)).To(Succeed(), "unmarshaling %s", p)
-			obj = o
-		case "APIExport":
-			o := &apisv1alpha2.APIExport{}
-			ExpectWithOffset(1, yaml.Unmarshal(raw, o)).To(Succeed(), "unmarshaling %s", p)
-			obj = o
-		default:
-			Fail(fmt.Sprintf("unsupported fixture kind %q in %s", meta.Kind, p))
-		}
-
-		ExpectWithOffset(1, cli.Cluster(wsPath).Create(ctx, obj)).To(Succeed(), "creating fixture %s in %s", p, wsPath)
+		applyFixture(ctx, cli, wsPath, p, nil)
 	}
 }
