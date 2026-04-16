@@ -1,9 +1,15 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package webhook
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/kcp-dev/logicalcluster/v3"
+	"github.com/kcp-dev/multicluster-provider/apiexport"
+	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -13,12 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	"github.com/kcp-dev/logicalcluster/v3"
-	"github.com/kcp-dev/multicluster-provider/apiexport"
-
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
-
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
@@ -81,6 +81,7 @@ func (w *DependencyRuleWatcher) PopulateRegistry(ctx context.Context) error {
 	}
 
 	logger.Info("rule registry populated")
+
 	return nil
 }
 
@@ -139,8 +140,10 @@ func (w *DependencyRuleWatcher) Reconcile(ctx context.Context, req mcreconcile.R
 		if client.IgnoreNotFound(err) == nil {
 			logger.Info("DependencyRule deleted, tearing down cache")
 			w.Registry.Unregister(key)
+
 			return ctrl.Result{}, nil
 		}
+
 		return ctrl.Result{}, err
 	}
 
@@ -197,6 +200,7 @@ func (w *DependencyRuleWatcher) ensureWatcher(ctx context.Context, key string, r
 			if val == "" {
 				return nil
 			}
+
 			return []string{val}
 		}); err != nil {
 			mgrCancel()
@@ -220,6 +224,7 @@ func (w *DependencyRuleWatcher) ensureWatcher(ctx context.Context, key string, r
 			if !registry.Get(ruleKey).Ready {
 				registry.MarkReady(ruleKey)
 			}
+
 			return ctrl.Result{}, nil
 		})); err != nil {
 		mgrCancel()
@@ -241,6 +246,7 @@ func (w *DependencyRuleWatcher) ensureWatcher(ctx context.Context, key string, r
 	}
 
 	w.Registry.Register(key, state)
+
 	return nil
 }
 

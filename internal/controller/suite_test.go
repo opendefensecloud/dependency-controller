@@ -1,23 +1,23 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package controller_test
 
 import (
 	"testing"
 
+	"github.com/kcp-dev/multicluster-provider/envtest"
+	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	"github.com/stretchr/testify/require"
-
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
-	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
-	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
-	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
-
-	"github.com/kcp-dev/multicluster-provider/envtest"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 

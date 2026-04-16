@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package webhook
 
 import (
@@ -10,15 +13,19 @@ import (
 )
 
 func makeRequest(annotations map[string]string) admission.Request {
-	obj := map[string]interface{}{
+	obj := map[string]any{
 		"apiVersion": "v1",
 		"kind":       "VPC",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":        "my-vpc",
 			"annotations": annotations,
 		},
 	}
-	raw, _ := json.Marshal(obj)
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		panic(err)
+	}
+
 	return admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			OldObject: runtime.RawExtension{Raw: raw},
@@ -48,14 +55,18 @@ func TestObjectFromRequest_EmptyRaw(t *testing.T) {
 }
 
 func TestObjectFromRequest_FallsBackToObject(t *testing.T) {
-	obj := map[string]interface{}{
+	obj := map[string]any{
 		"apiVersion": "v1",
 		"kind":       "VPC",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name": "fallback-vpc",
 		},
 	}
-	raw, _ := json.Marshal(obj)
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("unexpected marshal error: %v", err)
+	}
+
 	req := admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Object: runtime.RawExtension{Raw: raw},

@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package e2e
 
 import (
@@ -25,13 +28,13 @@ var (
 )
 
 const (
-	kindClusterName  = "dep-ctrl-e2e"
-	kcpNamespace     = "kcp-system"
-	depNamespace     = "dependency-system"
-	kcpNodePort      = "31500"
-	certManagerVer   = "v1.17.2"
-	imageName        = "dependency-controller:integration-test"
-	helmTimeout      = "300s"
+	kindClusterName = "dep-ctrl-e2e"
+	kcpNamespace    = "kcp-system"
+	depNamespace    = "dependency-system"
+	kcpNodePort     = "31500"
+	certManagerVer  = "v1.17.2"
+	imageName       = "dependency-controller:integration-test"
+	helmTimeout     = "300s"
 )
 
 // Workspace names under root.
@@ -65,6 +68,7 @@ func lookupTool(envVar, fallback string) string {
 	if err != nil {
 		return fallback // let it fail later with a clear error
 	}
+
 	return p
 }
 
@@ -78,23 +82,25 @@ func init() {
 // run executes a command and returns combined output. Fails the test on non-zero exit.
 func run(name string, args ...string) string {
 	GinkgoHelper()
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(context.Background(), name, args...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	if err := cmd.Run(); err != nil {
 		Fail(fmt.Sprintf("command failed: %s %s\n%s\n%v", name, strings.Join(args, " "), buf.String(), err))
 	}
+
 	return buf.String()
 }
 
 // runNoFail executes a command and returns output + error without failing.
 func runNoFail(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(context.Background(), name, args...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	err := cmd.Run()
+
 	return buf.String(), err
 }
 
@@ -110,9 +116,9 @@ func kindctlNoFail(args ...string) (string, error) {
 }
 
 // kcpctl runs kubectl against kcp at a given workspace path.
-func kcpctl(wsPath string, args ...string) string {
+func kcpctl(wsPath string, args ...string) {
 	GinkgoHelper()
-	return run(kubectlBin, append([]string{
+	run(kubectlBin, append([]string{
 		"--kubeconfig", kcpHostKubeconfig,
 		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
 	}, args...)...)
@@ -145,7 +151,7 @@ func applyFixtureToWS(wsPath, file string, substitutions map[string]string) {
 		content = strings.ReplaceAll(content, "${"+k+"}", v)
 	}
 
-	cmd := exec.Command(kubectlBin,
+	cmd := exec.CommandContext(context.Background(), kubectlBin,
 		"--kubeconfig", kcpHostKubeconfig,
 		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
 		"apply", "-f", "-",
@@ -181,12 +187,13 @@ func waitFor(timeout time.Duration, desc string, check func() error) {
 	}
 }
 
-// secretField extracts a base64-decoded field from a k8s secret.
-func secretField(namespace, name, jsonpath string) []byte {
+// secretField extracts a base64-decoded field from a k8s secret in the kcp namespace.
+func secretField(name, jsonpath string) []byte {
 	GinkgoHelper()
-	out := kindctl("-n", namespace, "get", "secret", name, "-o", fmt.Sprintf("jsonpath=%s", jsonpath))
+	out := kindctl("-n", kcpNamespace, "get", "secret", name, "-o", fmt.Sprintf("jsonpath=%s", jsonpath))
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 	Expect(err).NotTo(HaveOccurred())
+
 	return decoded
 }
 
@@ -228,10 +235,10 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 	}
 	out, err := runNoFail(kindBin, "delete", "cluster", "--name", kindClusterName)
 	if err != nil {
-		fmt.Fprintf(GinkgoWriter, "kind delete: %s %v\n", out, err)
+		_, _ = fmt.Fprintf(GinkgoWriter, "kind delete: %s %v\n", out, err)
 	}
 	if tmpDir != "" {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 	}
 })
 
@@ -258,6 +265,7 @@ func installCertManager() {
 	waitFor(2*time.Minute, "cert-manager ready", func() error {
 		_, err := kindctlNoFail("-n", "cert-manager", "wait", "deployment", "cert-manager-webhook",
 			"--for=condition=Available", "--timeout=1s")
+
 		return err
 	})
 
@@ -268,7 +276,7 @@ func installCertManager() {
 }
 
 func deployKCP() {
-	runNoFail(helmBin, "repo", "add", "kcp", "https://kcp-dev.github.io/helm-charts")
+	_, _ = runNoFail(helmBin, "repo", "add", "kcp", "https://kcp-dev.github.io/helm-charts")
 	run(helmBin, "repo", "update", "kcp")
 
 	run(helmBin, "upgrade", "--install", "kcp", "kcp/kcp",
@@ -285,17 +293,19 @@ func buildAdminKubeconfigs() {
 	waitFor(time.Minute, "front-proxy admin cert issued", func() error {
 		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-admin-front-proxy-cert",
 			"-o", "jsonpath={.data.tls\\.crt}")
+
 		return err
 	})
 	waitFor(time.Minute, "kcp server admin cert issued", func() error {
 		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-admin-server-cert",
 			"-o", "jsonpath={.data.tls\\.crt}")
+
 		return err
 	})
 
 	// Extract front-proxy client certs for host kubeconfig.
-	fpClientCrt := secretField(kcpNamespace, "kcp-admin-front-proxy-cert", "{.data.tls\\.crt}")
-	fpClientKey := secretField(kcpNamespace, "kcp-admin-front-proxy-cert", "{.data.tls\\.key}")
+	fpClientCrt := secretField("kcp-admin-front-proxy-cert", "{.data.tls\\.crt}")
+	fpClientKey := secretField("kcp-admin-front-proxy-cert", "{.data.tls\\.key}")
 
 	fpCrtFile := filepath.Join(tmpDir, "fp-client.crt")
 	fpKeyFile := filepath.Join(tmpDir, "fp-client.key")
@@ -319,9 +329,9 @@ func buildAdminKubeconfigs() {
 	})
 
 	// Pod kubeconfig: kcp server directly, for in-cluster pods.
-	srvClientCrt := secretField(kcpNamespace, "kcp-admin-server-cert", "{.data.tls\\.crt}")
-	srvClientKey := secretField(kcpNamespace, "kcp-admin-server-cert", "{.data.tls\\.key}")
-	kcpServerCA := secretField(kcpNamespace, "kcp-ca", "{.data.tls\\.crt}")
+	srvClientCrt := secretField("kcp-admin-server-cert", "{.data.tls\\.crt}")
+	srvClientKey := secretField("kcp-admin-server-cert", "{.data.tls\\.key}")
+	kcpServerCA := secretField("kcp-ca", "{.data.tls\\.crt}")
 
 	srvCrtFile := filepath.Join(tmpDir, "srv-client.crt")
 	srvKeyFile := filepath.Join(tmpDir, "srv-client.key")
@@ -352,7 +362,7 @@ func buildAndLoadImage() {
 func setupKCPWorkspaces() {
 	// Create all workspaces.
 	for _, ws := range []string{wsDepCtrl, wsNetworkProvider, wsComputeProvider, wsConsumer1, wsConsumer2} {
-		cmd := exec.Command(kubectlBin,
+		cmd := exec.CommandContext(context.Background(), kubectlBin,
 			"--kubeconfig", kcpHostKubeconfig,
 			"--server", fmt.Sprintf("https://localhost:%s/clusters/root", kcpNodePort),
 			"apply", "-f", "-",
@@ -377,6 +387,7 @@ metadata:
 			if strings.TrimSpace(out) != "Ready" {
 				return fmt.Errorf("workspace %s phase: %s", ws, out)
 			}
+
 			return nil
 		})
 	}
@@ -428,6 +439,7 @@ metadata:
 			if strings.TrimSpace(out) != "Bound" {
 				return fmt.Errorf("phase: %s", out)
 			}
+
 			return nil
 		})
 	}
@@ -438,7 +450,7 @@ func deployCharts() {
 
 	// Create kubeconfig secret for in-cluster pods.
 	internalKubeconfig := filepath.Join(tmpDir, "kcp-internal.kubeconfig")
-	cmd := exec.Command(kubectlBin, "--context", "kind-"+kindClusterName,
+	cmd := exec.CommandContext(context.Background(), kubectlBin, "--context", "kind-"+kindClusterName,
 		"-n", depNamespace, "create", "secret", "generic", "kcp-kubeconfig",
 		"--from-file=kubeconfig="+internalKubeconfig,
 		"--dry-run=client", "-o", "yaml")
@@ -446,7 +458,7 @@ func deployCharts() {
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	Expect(cmd.Run()).To(Succeed(), buf.String())
-	applyCmd := exec.Command(kubectlBin, "--context", "kind-"+kindClusterName, "apply", "-f", "-")
+	applyCmd := exec.CommandContext(context.Background(), kubectlBin, "--context", "kind-"+kindClusterName, "apply", "-f", "-")
 	applyCmd.Stdin = bytes.NewReader(buf.Bytes())
 	var applyBuf bytes.Buffer
 	applyCmd.Stdout = &applyBuf

@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package webhook
 
 import (
@@ -85,6 +88,7 @@ func (r *RuleRegistry) Exists(key string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	_, exists := r.rules[key]
+
 	return exists
 }
 
@@ -92,6 +96,7 @@ func (r *RuleRegistry) Exists(key string) bool {
 func (r *RuleRegistry) Get(key string) *RuleState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
 	return r.rules[key]
 }
 
@@ -122,6 +127,7 @@ func (r *RuleRegistry) FindByTargetGVR(gvr schema.GroupVersionResource) []RuleEn
 			}
 		}
 	}
+
 	return entries
 }
 
@@ -135,6 +141,7 @@ func (r *RuleRegistry) AllTargetGVRs() []schema.GroupVersionResource {
 	for gvr := range r.byTarget {
 		gvrs = append(gvrs, gvr)
 	}
+
 	return gvrs
 }
 
@@ -158,6 +165,7 @@ func (r *RuleRegistry) AllDependentGVRs() []schema.GroupVersionResource {
 			gvrs = append(gvrs, gvr)
 		}
 	}
+
 	return gvrs
 }
 

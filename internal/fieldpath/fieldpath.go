@@ -1,10 +1,13 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package fieldpath
 
 import "strings"
 
 // Resolve extracts a string value from a nested map using a dot-notation path.
 // Path format: ".spec.vpcRef.name" (leading dot is optional).
-func Resolve(obj map[string]interface{}, path string) string {
+func Resolve(obj map[string]any, path string) string {
 	path = strings.TrimPrefix(path, ".")
 	parts := strings.Split(path, ".")
 
@@ -19,17 +22,19 @@ func Resolve(obj map[string]interface{}, path string) string {
 			if !ok {
 				return ""
 			}
+
 			return s
 		}
 		next, ok := current[part]
 		if !ok {
 			return ""
 		}
-		m, ok := next.(map[string]interface{})
+		m, ok := next.(map[string]any)
 		if !ok {
 			return ""
 		}
 		current = m
 	}
+
 	return ""
 }

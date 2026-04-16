@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 import (
@@ -63,7 +66,9 @@ func (m *RBACManager) Reconcile(ctx context.Context) error {
 	// Reconcile ClusterRole.
 	existing := &rbacv1.ClusterRole{}
 	err := m.Client.Get(ctx, types.NamespacedName{Name: rbacClusterRoleName}, existing)
-	if apierrors.IsNotFound(err) {
+
+	switch {
+	case apierrors.IsNotFound(err):
 		cr := &rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: rbacClusterRoleName,
@@ -74,9 +79,9 @@ func (m *RBACManager) Reconcile(ctx context.Context) error {
 		if err := m.Client.Create(ctx, cr); err != nil {
 			return fmt.Errorf("creating ClusterRole: %w", err)
 		}
-	} else if err != nil {
+	case err != nil:
 		return fmt.Errorf("getting ClusterRole: %w", err)
-	} else {
+	default:
 		existing.Rules = desiredRules
 		logger.Info("updating ClusterRole in system:master", "rules", len(desiredRules))
 		if err := m.Client.Update(ctx, existing); err != nil {
@@ -119,6 +124,7 @@ func (m *RBACManager) buildPolicyRules() []rbacv1.PolicyRule {
 			Verbs:     []string{"get", "list", "watch"},
 		})
 	}
+
 	return rules
 }
 
@@ -154,5 +160,6 @@ func (m *RBACManager) ensureClusterRoleBinding(ctx context.Context) error {
 	if err := m.Client.Create(ctx, crb); err != nil {
 		return fmt.Errorf("creating ClusterRoleBinding: %w", err)
 	}
+
 	return nil
 }

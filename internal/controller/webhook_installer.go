@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 import (
@@ -5,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/kcp-dev/logicalcluster/v3"
 	registrationv1 "k8s.io/api/admissionregistration/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,8 +17,6 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	"github.com/kcp-dev/logicalcluster/v3"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 )
@@ -78,6 +80,7 @@ func (w *WebhookInstaller) EnsureWebhooks(ctx context.Context, ruleKey string, r
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -104,6 +107,7 @@ func (w *WebhookInstaller) RemoveWebhooks(ctx context.Context, ruleName string) 
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -174,6 +178,7 @@ func (w *WebhookInstaller) reconcileWorkspaceWebhook(ctx context.Context, wsPath
 				return fmt.Errorf("deleting webhook in %s: %w", wsPath, err)
 			}
 		}
+
 		return nil
 	}
 
@@ -186,6 +191,7 @@ func (w *WebhookInstaller) reconcileWorkspaceWebhook(ctx context.Context, wsPath
 		if err := c.Create(ctx, whCfg); err != nil {
 			return fmt.Errorf("creating webhook in %s: %w", wsPath, err)
 		}
+
 		return nil
 	}
 
@@ -197,6 +203,7 @@ func (w *WebhookInstaller) reconcileWorkspaceWebhook(ctx context.Context, wsPath
 	if err := c.Update(ctx, whCfg); err != nil {
 		return fmt.Errorf("updating webhook in %s: %w", wsPath, err)
 	}
+
 	return nil
 }
 
@@ -214,6 +221,7 @@ func (w *WebhookInstaller) desiredRulesForWorkspace(wsPath string) map[webhookRu
 			}
 		}
 	}
+
 	return desired
 }
 
@@ -229,6 +237,7 @@ func (w *WebhookInstaller) buildRuleList(desired map[webhookRuleKey]struct{}) []
 			},
 		})
 	}
+
 	return rules
 }
 

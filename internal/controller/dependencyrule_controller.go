@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 import (
@@ -8,7 +11,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
@@ -56,6 +58,7 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 			logger.Info("DependencyRule deleted")
 			return ctrl.Result{}, r.handleDeletion(ctx, ruleKey, req.Name)
 		}
+
 		return ctrl.Result{}, err
 	}
 

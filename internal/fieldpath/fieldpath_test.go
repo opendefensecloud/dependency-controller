@@ -1,11 +1,14 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package fieldpath
 
 import "testing"
 
 func TestResolve(t *testing.T) {
-	obj := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"vpcRef": map[string]interface{}{
+	obj := map[string]any{
+		"spec": map[string]any{
+			"vpcRef": map[string]any{
 				"name": "my-vpc",
 			},
 			"count":  int64(3),

@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package controller_test
 
 import (
@@ -17,6 +20,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kcp-dev/logicalcluster/v3"
+	"github.com/kcp-dev/multicluster-provider/apiexport"
+	clusterclient "github.com/kcp-dev/multicluster-provider/client"
+	"github.com/kcp-dev/multicluster-provider/envtest"
+	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	"github.com/kcp-dev/sdk/apis/core"
 	registrationv1 "k8s.io/api/admissionregistration/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,20 +40,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-	"sigs.k8s.io/yaml"
-
-	"github.com/kcp-dev/logicalcluster/v3"
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
-	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
-	"github.com/kcp-dev/sdk/apis/core"
-
-	"github.com/kcp-dev/multicluster-provider/apiexport"
-	clusterclient "github.com/kcp-dev/multicluster-provider/client"
-	"github.com/kcp-dev/multicluster-provider/envtest"
-
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
+	"sigs.k8s.io/yaml"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 	"go.opendefense.cloud/dependency-controller/internal/controller"
@@ -137,6 +137,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				if err := cli.Cluster(ep.path).Get(ctx, client.ObjectKey{Name: ep.name}, endpoints); err != nil {
 					return false, fmt.Sprintf("get %s/%s: %v", ep.path, ep.name, err)
 				}
+
 				return len(endpoints.Status.APIExportEndpoints) > 0, toYAML(endpoints)
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for endpoints %s in %s", ep.name, ep.path)
 		}
@@ -163,6 +164,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 					if err := cli.Cluster(cp).List(ctx, u); err != nil {
 						return false, fmt.Sprintf("list %s in %s: %v", gvk.Kind, cp, err)
 					}
+
 					return true, ""
 				}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for %s in %s", gvk.Kind, cp)
 			}
@@ -211,6 +213,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				return err
 			}
 			close(initialized)
+
 			return nil
 		}))
 		Expect(err).NotTo(HaveOccurred())
@@ -282,6 +285,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				if strings.Contains(err.Error(), "still referenced by") {
 					return true, ""
 				}
+
 				return false, fmt.Sprintf("forbidden but not a dependency block: %v", err)
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook to block deletion")
 		})
@@ -304,6 +308,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				if err != nil {
 					return false, fmt.Sprintf("deletion still blocked: %v", err)
 				}
+
 				return true, ""
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for VPC to be deletable")
 		})
@@ -329,6 +334,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				if apierrors.IsForbidden(err) && strings.Contains(err.Error(), "still referenced by") {
 					return true, ""
 				}
+
 				return false, fmt.Sprintf("unexpected error: %v", err)
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook to block deletion")
 
@@ -351,6 +357,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 				if err != nil {
 					return false, fmt.Sprintf("get webhook: %v", err)
 				}
+
 				return false, "webhook still exists"
 			}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for webhook removal")
 
@@ -427,11 +434,12 @@ func startWebhookServer(ctx context.Context) (caBundle []byte, url string) {
 			if webhookHandler == nil {
 				return admission.Allowed("webhook not ready")
 			}
+
 			return webhookHandler.Handle(ctx, req)
 		},
 	)})
 
-	server := &http.Server{Handler: mux}
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		defer GinkgoRecover()
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -453,6 +461,7 @@ func waitForBinding(ctx context.Context, cli clusterclient.ClusterClient, wsPath
 		if err := cli.Cluster(wsPath).Get(ctx, client.ObjectKey{Name: bindingName}, b); err != nil {
 			return false, fmt.Sprintf("get: %v", err)
 		}
+
 		return b.Status.Phase == apisv1alpha2.APIBindingPhaseBound, fmt.Sprintf("phase: %s", b.Status.Phase)
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for binding %s in %s", bindingName, wsPath)
 }
@@ -462,6 +471,7 @@ func toYAML(obj any) string {
 	if err != nil {
 		return fmt.Sprintf("<marshal error: %v>", err)
 	}
+
 	return string(data)
 }
 
@@ -486,22 +496,27 @@ func loadFixture(path string, replacements map[string]string) client.Object {
 	case "APIResourceSchema":
 		o := &apisv1alpha1.APIResourceSchema{}
 		ExpectWithOffset(1, yaml.Unmarshal(data, o)).To(Succeed(), "unmarshaling %s", path)
+
 		return o
 	case "APIExport":
 		o := &apisv1alpha2.APIExport{}
 		ExpectWithOffset(1, yaml.Unmarshal(data, o)).To(Succeed(), "unmarshaling %s", path)
+
 		return o
 	case "APIBinding":
 		o := &apisv1alpha2.APIBinding{}
 		ExpectWithOffset(1, yaml.Unmarshal(data, o)).To(Succeed(), "unmarshaling %s", path)
+
 		return o
 	case "DependencyRule":
 		o := &v1alpha1.DependencyRule{}
 		ExpectWithOffset(1, yaml.Unmarshal(data, o)).To(Succeed(), "unmarshaling %s", path)
+
 		return o
 	default:
 		o := &unstructured.Unstructured{}
 		ExpectWithOffset(1, yaml.Unmarshal(data, &o.Object)).To(Succeed(), "unmarshaling %s", path)
+
 		return o
 	}
 }

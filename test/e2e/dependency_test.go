@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package e2e
 
 import (
@@ -48,6 +51,7 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			if strings.Contains(out, "still referenced by") {
 				return nil
 			}
+
 			return fmt.Errorf("unexpected output: %s", out)
 		})
 	})
@@ -85,6 +89,7 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			if strings.Contains(out, "still referenced by") {
 				return nil
 			}
+
 			return fmt.Errorf("unexpected output: %s", out)
 		})
 
@@ -97,6 +102,7 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			if err != nil {
 				return nil // not found = removed
 			}
+
 			return fmt.Errorf("webhook still exists")
 		})
 

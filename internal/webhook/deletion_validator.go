@@ -1,3 +1,6 @@
+// Copyright 2026 Open Defense and dependency-controller contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package webhook
 
 import (
@@ -7,13 +10,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/kcp-dev/logicalcluster/v3"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-
-	"github.com/kcp-dev/logicalcluster/v3"
 )
 
 const (
@@ -81,6 +83,7 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 	if clusterName.Empty() {
 		err := fmt.Errorf("object has no %s annotation", logicalcluster.AnnotationKey)
 		logger.Error(err, "failed to extract cluster from admission request")
+
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
@@ -102,6 +105,7 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		if !entry.State.Ready {
 			msg := fmt.Sprintf("dependency check unavailable for rule %s: cache warming up, retry later", entry.Key)
 			logger.Info(msg)
+
 			return admission.Denied(msg)
 		}
 
@@ -133,6 +137,7 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		msg := fmt.Sprintf("cannot delete %s/%s: still referenced by %s",
 			req.Resource.Resource, req.Name, strings.Join(blockers, ", "))
 		logger.Info("deletion blocked", "blockers", blockers)
+
 		return admission.Denied(msg)
 	}
 
@@ -154,5 +159,6 @@ func objectFromRequest(req admission.Request) (*unstructured.Unstructured, error
 	if err := json.Unmarshal(raw, &obj.Object); err != nil {
 		return nil, fmt.Errorf("unmarshaling object: %w", err)
 	}
+
 	return obj, nil
 }
