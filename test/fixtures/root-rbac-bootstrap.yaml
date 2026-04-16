@@ -1,16 +1,44 @@
-# Minimal RBAC in the root workspace for the dependency-controller system.
+# RBAC in the root workspace for the dependency-controller system.
 # Applied during setup using a bootstrap (system:masters) identity.
 #
-# In kcp, the webhook SA needs workspaces/content access in root to enter
-# child workspaces through APIExport virtual workspace endpoints.
-# The apiexports/content RBAC in each provider workspace is managed
-# dynamically by the controller's RBACManager.
+# Both components need workspaces/content access to enter the dep-ctrl
+# workspace (where their kubeconfig points). Webhook installation and
+# RBAC management in provider workspaces is done through the dep-ctrl
+# APIExport's virtual workspace, authorized by permissionClaims.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dependency-controller
+rules:
+  # Enter child workspaces through virtual workspace endpoints.
+  - apiGroups: ["core.kcp.io"]
+    resources: ["workspaces/content"]
+    verbs: ["access"]
+  # Read Workspace objects to resolve workspace paths to logical cluster names.
+  - apiGroups: ["tenancy.kcp.io"]
+    resources: ["workspaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dependency-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dependency-controller
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "system:serviceaccount:dependency-system:dependency-controller"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: dependency-controller-webhook
 rules:
+  # Enter child workspaces through virtual workspace endpoints.
   - apiGroups: ["core.kcp.io"]
     resources: ["workspaces/content"]
     verbs: ["access"]

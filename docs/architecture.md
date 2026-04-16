@@ -25,22 +25,24 @@ The system solves this with two cooperating binaries:
 ```mermaid
 graph LR
     subgraph DC["Dep-Ctrl Workspace"]
-        DCExport["APIExport:<br/>DependencyRule"]
+        DCExport["APIExport:<br/>DependencyRule<br/><i>+ permissionClaims</i>"]
     end
 
     subgraph CP["Compute Provider WS"]
-        CPBinding["APIBinding: dep-ctrl"]
+        CPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
         CPExport["APIExport: compute"]
         CPRule["DependencyRule:<br/>VM → VPC"]
+        CPRBAC["ClusterRole:<br/>apiexports/content"]
     end
 
     subgraph NP["Network Provider WS"]
+        NPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
         NPExport["APIExport: VPCs"]
         NPWebhook["ValidatingWebhook"]
     end
 
     subgraph ROOT["Root Workspace"]
-        ROOTROLE["ClusterRole:<br/>dependency-controller-webhook<br/><i>(workspaces/content access)</i>"]
+        ROOTROLE["ClusterRoles:<br/><i>workspaces/content +<br/>workspace resolution</i>"]
     end
 
     subgraph CW["Consumer WS"]
@@ -49,6 +51,7 @@ graph LR
     end
 
     CPBinding -->|binds to| DCExport
+    NPBinding -->|binds to| DCExport
     CWBindings -->|binds to| CPExport
     CWBindings -->|binds to| NPExport
 
@@ -60,26 +63,33 @@ graph LR
 ```
 
 **Dep-ctrl workspace** -- hosts the `DependencyRule` APIExport
-(`dependencies.opendefense.cloud`). Both the controller and webhook connect to
-this workspace's virtual workspace to discover rules.
+(`dependencies.opendefense.cloud`) with `permissionClaims` for
+`validatingwebhookconfigurations`, `clusterroles`, and `clusterrolebindings`.
+Both the controller and webhook connect to this workspace's virtual workspace
+to discover rules. The controller also uses the virtual workspace to manage
+webhooks and RBAC in binding workspaces (authorized by the permissionClaims).
 
 **Provider workspaces** -- each provider (compute, network, ...) exports its own
 resource types and binds to the dep-ctrl APIExport to create `DependencyRule`
-objects that declare how their resources reference other providers' resources.
+objects. The APIBinding must **accept** the dep-ctrl's permissionClaims, which
+grants the controller access to manage `ValidatingWebhookConfigurations`,
+`ClusterRoles`, and `ClusterRoleBindings` in those workspaces through the
+virtual workspace.
 
 **Consumer workspaces** -- bind to provider exports and create the actual
 resources (VPCs, VMs). Consumers don't interact with the dependency system directly.
 
-**Root workspace** -- hosts a static `ClusterRole` granting the webhook server
-`workspaces/content` access, which is needed to enter child workspaces through
-APIExport virtual workspace endpoints. This is a deployment prerequisite.
+**Root workspace** -- hosts static `ClusterRoles` granting both components
+`workspaces/content` access (needed to enter child workspaces). The controller
+additionally gets `workspaces` read access to resolve workspace paths to logical
+cluster names. This is a deployment prerequisite.
 
 ## Component Overview
 
 ```mermaid
 flowchart TD
     subgraph Controller["Controller Binary (cmd/controller)"]
-        DR["DependencyRule Reconciler"]
+        DR["DependencyRule Reconciler<br/><i>+ Workspace Resolver</i>"]
         DR -->|delegates to| WI["Webhook Installer"]
         DR -->|updates| RBAC["RBAC Manager<br/><i>apiexports/content per provider WS</i>"]
     end
@@ -92,7 +102,8 @@ flowchart TD
         DV -->|"queries"| RR
     end
 
-    WI -->|"installs in"| PW["Provider Workspaces"]
+    WI -->|"installs via dep-ctrl VW"| PW["Provider Workspaces"]
+    RBAC -->|"creates via dep-ctrl VW"| PW
     PW -->|"dispatches DELETE to"| DV
 
     style Controller fill:#dbeafe,color:#1e3a5f
@@ -108,7 +119,26 @@ flowchart TD
 
 The controller watches `DependencyRule` objects and ensures the infrastructure is
 in place for the webhook to do its job: admission webhooks exist in the right
-provider workspaces, and RBAC grants the system read access to dependent resources.
+provider workspaces, and RBAC grants the webhook read access to dependent resources.
+
+All operations in provider workspaces are routed through the dep-ctrl APIExport's
+virtual workspace, authorized by `permissionClaims`. The controller never connects
+directly to provider workspaces.
+
+### Initialization and Workspace Resolution
+
+On first reconcile, the controller lazily initializes two components
+([`ensureInitialized`](../internal/controller/dependencyrule_controller.go)):
+
+1. **VW URL discovery** -- reads the `APIExportEndpointSlice` for the dep-ctrl
+   APIExport to find the virtual workspace base URL
+2. **Workspace resolver** -- resolves workspace paths (e.g., `root:network-provider`)
+   to logical cluster names (e.g., `qh6707jkfsen31z9`) by reading `Workspace`
+   objects from the root workspace (`ws.Spec.Cluster`)
+
+The VW only accepts logical cluster names in its `/clusters/<name>` path, not
+workspace paths. The resolver caches mappings and is consulted before every
+webhook or RBAC operation.
 
 ### How a DependencyRule becomes a webhook
 
@@ -124,13 +154,19 @@ updates a `ValidatingWebhookConfiguration` named `dependency-controller` in each
 provider workspace whose resources are referenced as dependencies.
 
 The rule's `spec.dependencies[].apiExportRef.path` determines which workspace to
-target. The installer groups all dependency targets by workspace and merges them
+target. The reconciler resolves the path to a logical cluster name and sets the
+installer's `BaseConfig` to the dep-ctrl VW URL, so the installer connects via
+`<vw-url>/clusters/<logical-cluster-name>`. The `permissionClaims` on the dep-ctrl
+APIExport authorize creating `ValidatingWebhookConfigurations` in the binding
+workspace.
+
+The installer groups all dependency targets by workspace and merges them
 into a single webhook per workspace
 ([`reconcileWorkspaceWebhook`](../internal/controller/webhook_installer.go)).
 
 For example, if two DependencyRules both protect resources from the network
-provider, the installer creates one webhook in `root:network-provider` with two
-`rules` entries (one per protected GVR). This merging is tracked via
+provider, the installer creates one webhook in the network provider's workspace
+with two `rules` entries (one per protected GVR). This merging is tracked via
 `ruleTargets map[string][]ruleTarget` -- keyed by DependencyRule, so each rule's
 contributions can be independently added or removed. On any change,
 [`desiredRulesForWorkspace`](../internal/controller/webhook_installer.go)
@@ -145,12 +181,17 @@ workspace, the webhook is deleted entirely.
 
 The [`RBACManager`](../internal/controller/rbac_manager.go) dynamically manages
 `ClusterRole` and `ClusterRoleBinding` objects in provider workspaces, granting
-the webhook server access to APIExport virtual workspaces.
+the webhook server access to APIExport virtual workspaces for dependent resource
+types.
 
 In kcp, access to an APIExport's virtual workspace is controlled by the
 `apiexports/content` subresource in the workspace where the APIExport is defined.
 The webhook needs this access to watch dependent resources across consumer
 workspaces.
+
+Like webhook installation, RBAC operations are routed through the dep-ctrl VW
+using resolved logical cluster names. The `permissionClaims` authorize creating
+`ClusterRoles` and `ClusterRoleBindings` in binding workspaces.
 
 Each reconcile calls `TrackRule(key, ref)` with the rule's
 [`ExportRef`](../internal/controller/rbac_manager.go) (workspace path + APIExport
@@ -166,11 +207,6 @@ On rule deletion, `RemoveRule(key)` returns the affected workspace path. The
 reconciler then passes it as an extra workspace to `Reconcile(ctx, wsPath)` to
 ensure cleanup. If no rules remain for a workspace, the `ClusterRole` and
 `ClusterRoleBinding` are deleted.
-
-**Prerequisites:** The webhook service account must have `workspaces/content`
-access in the root workspace to enter child workspaces through VW endpoints.
-This is a static grant applied at deployment time
-([`test/fixtures/root-rbac-bootstrap.yaml`](../test/fixtures/root-rbac-bootstrap.yaml)).
 
 ---
 

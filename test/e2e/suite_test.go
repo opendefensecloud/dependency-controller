@@ -55,6 +55,10 @@ var (
 
 	// Host kubeconfig for kcp via front-proxy NodePort.
 	kcpHostKubeconfig string
+
+	// Per-component kubeconfigs for in-cluster pods.
+	controllerKubeconfigPath string
+	webhookKubeconfigPath    string
 )
 
 func TestE2E(t *testing.T) {
@@ -311,14 +315,17 @@ var _ = SynchronizedBeforeSuite(func() {
 	By("exposing kcp server via NodePort")
 	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-server-nodeport.yaml"))
 
+	By("building component kubeconfigs")
+	buildComponentKubeconfigs()
+
 	By("building and loading image")
 	buildAndLoadImage()
 
 	By("setting up kcp workspaces")
 	setupKCPWorkspaces()
 
-	By("bootstrapping RBAC in root workspace")
-	bootstrapRootRBAC()
+	By("bootstrapping RBAC")
+	bootstrapRBAC()
 
 	By("deploying helm charts")
 	deployCharts()
@@ -393,12 +400,6 @@ func buildAdminKubeconfigs() {
 
 		return err
 	})
-	waitFor(time.Minute, "kcp server admin cert issued", func() error {
-		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-admin-server-cert",
-			"-o", "jsonpath={.data.tls\\.crt}")
-
-		return err
-	})
 
 	// Extract front-proxy client certs for host kubeconfig.
 	fpClientCrt := secretField("kcp-admin-front-proxy-cert", "{.data.tls\\.crt}")
@@ -424,37 +425,81 @@ func buildAdminKubeconfigs() {
 		_, err := runNoFail(kubectlBin, "--kubeconfig", kcpHostKubeconfig, "get", "--raw", "/readyz")
 		return err
 	})
-
-	// Pod kubeconfig: kcp server directly, for in-cluster pods.
-	srvClientCrt := secretField("kcp-admin-server-cert", "{.data.tls\\.crt}")
-	srvClientKey := secretField("kcp-admin-server-cert", "{.data.tls\\.key}")
-	kcpServerCA := secretField("kcp-ca", "{.data.tls\\.crt}")
-
-	srvCrtFile := filepath.Join(tmpDir, "srv-client.crt")
-	srvKeyFile := filepath.Join(tmpDir, "srv-client.key")
-	caFile := filepath.Join(tmpDir, "kcp-server-ca.crt")
-	Expect(os.WriteFile(srvCrtFile, srvClientCrt, 0o600)).To(Succeed())
-	Expect(os.WriteFile(srvKeyFile, srvClientKey, 0o600)).To(Succeed())
-	Expect(os.WriteFile(caFile, kcpServerCA, 0o600)).To(Succeed())
-
-	internalKubeconfig := filepath.Join(tmpDir, "kcp-internal.kubeconfig")
-	run(kubectlBin, "--kubeconfig", internalKubeconfig, "config", "set-cluster", "kcp",
-		fmt.Sprintf("--server=https://kcp.%s.svc.cluster.local:6443/clusters/root:%s", kcpNamespace, wsDepCtrl),
-		"--certificate-authority="+caFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", internalKubeconfig, "config", "set-credentials", "kcp-admin",
-		"--client-certificate="+srvCrtFile,
-		"--client-key="+srvKeyFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", internalKubeconfig, "config", "set-context", "kcp",
-		"--cluster=kcp", "--user=kcp-admin")
-	run(kubectlBin, "--kubeconfig", internalKubeconfig, "config", "use-context", "kcp")
 }
 
-// bootstrapRootRBAC uses the bootstrap (system:masters) cert to create
-// minimal RBAC in the root workspace, granting the webhook SA workspace
-// access so it can enter child workspaces through virtual workspace endpoints.
-func bootstrapRootRBAC() {
+// buildComponentKubeconfigs creates per-component client certificates and
+// kubeconfigs for the controller and webhook. Each component gets a
+// least-privilege identity instead of shared admin credentials.
+func buildComponentKubeconfigs() {
+	// Apply cert requests for controller and webhook identities.
+	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-controller-cert.yaml"))
+	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-webhook-sa-cert.yaml"))
+
+	waitFor(time.Minute, "controller cert issued", func() error {
+		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-controller-cert",
+			"-o", "jsonpath={.data.tls\\.crt}")
+		return err
+	})
+	waitFor(time.Minute, "webhook SA cert issued", func() error {
+		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-webhook-sa-cert",
+			"-o", "jsonpath={.data.tls\\.crt}")
+		return err
+	})
+
+	kcpServerCA := secretField("kcp-ca", "{.data.tls\\.crt}")
+	caFile := filepath.Join(tmpDir, "kcp-server-ca.crt")
+	Expect(os.WriteFile(caFile, kcpServerCA, 0o600)).To(Succeed())
+
+	kcpInternalServer := fmt.Sprintf("https://kcp.%s.svc.cluster.local:6443/clusters/root:%s", kcpNamespace, wsDepCtrl)
+
+	// Build controller kubeconfig.
+	ctrlCrt := secretField("kcp-controller-cert", "{.data.tls\\.crt}")
+	ctrlKey := secretField("kcp-controller-cert", "{.data.tls\\.key}")
+	ctrlCrtFile := filepath.Join(tmpDir, "ctrl-client.crt")
+	ctrlKeyFile := filepath.Join(tmpDir, "ctrl-client.key")
+	Expect(os.WriteFile(ctrlCrtFile, ctrlCrt, 0o600)).To(Succeed())
+	Expect(os.WriteFile(ctrlKeyFile, ctrlKey, 0o600)).To(Succeed())
+
+	controllerKubeconfigPath = filepath.Join(tmpDir, "kcp-controller.kubeconfig")
+	run(kubectlBin, "--kubeconfig", controllerKubeconfigPath, "config", "set-cluster", "kcp",
+		"--server="+kcpInternalServer,
+		"--certificate-authority="+caFile,
+		"--embed-certs=true")
+	run(kubectlBin, "--kubeconfig", controllerKubeconfigPath, "config", "set-credentials", "controller",
+		"--client-certificate="+ctrlCrtFile,
+		"--client-key="+ctrlKeyFile,
+		"--embed-certs=true")
+	run(kubectlBin, "--kubeconfig", controllerKubeconfigPath, "config", "set-context", "kcp",
+		"--cluster=kcp", "--user=controller")
+	run(kubectlBin, "--kubeconfig", controllerKubeconfigPath, "config", "use-context", "kcp")
+
+	// Build webhook kubeconfig.
+	whCrt := secretField("kcp-webhook-sa-cert", "{.data.tls\\.crt}")
+	whKey := secretField("kcp-webhook-sa-cert", "{.data.tls\\.key}")
+	whCrtFile := filepath.Join(tmpDir, "webhook-client.crt")
+	whKeyFile := filepath.Join(tmpDir, "webhook-client.key")
+	Expect(os.WriteFile(whCrtFile, whCrt, 0o600)).To(Succeed())
+	Expect(os.WriteFile(whKeyFile, whKey, 0o600)).To(Succeed())
+
+	webhookKubeconfigPath = filepath.Join(tmpDir, "kcp-webhook.kubeconfig")
+	run(kubectlBin, "--kubeconfig", webhookKubeconfigPath, "config", "set-cluster", "kcp",
+		"--server="+kcpInternalServer,
+		"--certificate-authority="+caFile,
+		"--embed-certs=true")
+	run(kubectlBin, "--kubeconfig", webhookKubeconfigPath, "config", "set-credentials", "webhook",
+		"--client-certificate="+whCrtFile,
+		"--client-key="+whKeyFile,
+		"--embed-certs=true")
+	run(kubectlBin, "--kubeconfig", webhookKubeconfigPath, "config", "set-context", "kcp",
+		"--cluster=kcp", "--user=webhook")
+	run(kubectlBin, "--kubeconfig", webhookKubeconfigPath, "config", "use-context", "kcp")
+}
+
+// bootstrapRBAC uses the bootstrap (system:masters) cert to create
+// RBAC for the controller and webhook identities.
+// - Root workspace: workspace access, webhook/RBAC management, APIExport content
+// - Dep-ctrl workspace: APIExportEndpointSlice read for VW URL discovery
+func bootstrapRBAC() {
 	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-bootstrap-cert.yaml"))
 
 	waitFor(time.Minute, "bootstrap cert issued", func() error {
@@ -488,9 +533,14 @@ func bootstrapRootRBAC() {
 		"--cluster=kcp", "--user=bootstrap")
 	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "use-context", "kcp")
 
-	// Apply the minimal RBAC fixtures in the root workspace.
+	// Apply RBAC in the root workspace.
 	run(kubectlBin, "--kubeconfig", bsKubeconfig, "apply", "-f",
 		filepath.Join(fixturesDir, "root-rbac-bootstrap.yaml"))
+
+	// Apply RBAC in the dep-ctrl workspace (apiexportendpointslices read).
+	run(kubectlBin, "--kubeconfig", bsKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpServerLocalPort, wsDepCtrl),
+		"apply", "-f", filepath.Join(fixturesDir, "depctrl-rbac-bootstrap.yaml"))
 }
 
 func buildAndLoadImage() {
@@ -607,7 +657,8 @@ func createKubeconfigSecret(secretName, kubeconfigPath string) {
 func deployCharts() {
 	kindctlNoFail("create", "namespace", depNamespace) //nolint:errcheck
 
-	createKubeconfigSecret("kcp-kubeconfig", filepath.Join(tmpDir, "kcp-internal.kubeconfig"))
+	createKubeconfigSecret("kcp-controller-kubeconfig", controllerKubeconfigPath)
+	createKubeconfigSecret("kcp-webhook-kubeconfig", webhookKubeconfigPath)
 
 	run(helmBin, "upgrade", "--install", "dep-webhook",
 		filepath.Join(rootDir, "charts/dependency-webhook"),

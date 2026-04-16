@@ -82,7 +82,9 @@ The system runs as two independently deployable binaries that both watch
   resources are protected as dependencies
 - Creates `ClusterRole` and `ClusterRoleBinding` in each dependent's provider
   workspace granting the webhook `apiexports/content` access on the dependent
-  resource's APIExport (see [Webhook RBAC](#webhook-rbac))
+  resource's APIExport (see [RBAC Model](#rbac-model))
+- All provider workspace access goes through the dep-ctrl APIExport's virtual
+  workspace, authorized by `permissionClaims` on the APIExport
 
 **Webhook** (`cmd/webhook`) -- handles admission:
 - Maintains a dedicated indexed cache per rule, watching the dependent resource
@@ -109,17 +111,18 @@ sync-agent.
 ### Architecture
 
 The dependency-controller runs in its own workspace with its own APIExport for the
-`DependencyRule` type. Providers bind to it to create rules. Consumer workspaces do
-not need to bind to the dep-ctrl export.
+`DependencyRule` type. Provider workspaces bind to it to create rules and to accept
+the `permissionClaims` that grant the controller access to manage webhooks and RBAC
+in those workspaces. Consumer workspaces do not need to bind to the dep-ctrl export.
 
 ```mermaid
 graph LR
     subgraph DC["Dep-Ctrl Workspace"]
-        DCExport["APIExport:<br/>DependencyRule"]
+        DCExport["APIExport:<br/>DependencyRule<br/><i>+ permissionClaims</i>"]
     end
 
     subgraph CB["Controller Binary"]
-        Ctrl["DependencyRule Reconciler<br/>· Webhook Installer<br/>· RBAC Manager"]
+        Ctrl["DependencyRule Reconciler<br/>· Webhook Installer<br/>· RBAC Manager<br/>· Workspace Resolver"]
     end
 
     subgraph WB["Webhook Binary"]
@@ -127,18 +130,20 @@ graph LR
     end
 
     subgraph CP["Compute Provider WS"]
-        CPBinding["APIBinding: dep-ctrl"]
+        CPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
         CPExport["APIExport: compute"]
         CPRule["DependencyRule:<br/>VM → VPC"]
+        CPRBAC["ClusterRole:<br/>apiexports/content"]
     end
 
     subgraph NP["Network Provider WS"]
+        NPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
         NPExport["APIExport: VPCs"]
         NPWebhook["ValidatingWebhook"]
     end
 
     subgraph ROOT["Root Workspace"]
-        ROOTROLE["ClusterRole<br/>(workspaces/content access)"]
+        ROOTROLE["ClusterRoles<br/>(workspaces/content +<br/>workspace resolution)"]
     end
 
     subgraph CW["Consumer WS"]
@@ -147,10 +152,11 @@ graph LR
     end
 
     CPBinding -->|binds to| DCExport
-    Ctrl -.->|watches rules via| DCExport
-    Ctrl -.->|installs webhook in| NP
-    Ctrl -.->|manages apiexports/content<br/>RBAC in| CP
-    WH -.->|watches rules via| DCExport
+    NPBinding -->|binds to| DCExport
+    Ctrl -.->|watches rules via VW| DCExport
+    Ctrl -.->|installs webhook via VW| NP
+    Ctrl -.->|manages RBAC via VW| CP
+    WH -.->|watches rules via VW| DCExport
     WH -.->|watches VMs via| CPExport
     NPWebhook -.->|dispatches DELETE to| WH
     CWBindings -->|binds to| CPExport
@@ -175,73 +181,83 @@ graph LR
    (e.g., VMs) via the referenced APIExport's virtual workspace. Field indices enable the
    webhook to quickly find dependents referencing a given resource.
 
-**RBAC:** The controller dynamically manages per-workspace RBAC granting the webhook
-`apiexports/content` access. A static `workspaces/content` grant in the root workspace
-is required as a prerequisite (see [Webhook RBAC](#webhook-rbac)).
-
 For detailed architecture documentation, see [docs/architecture.md](docs/architecture.md).
 
-### Webhook RBAC
+### RBAC Model
 
-The webhook server needs to access APIExport virtual workspaces to watch dependent
-resources. In kcp, virtual workspace access is authorized via the `apiexports/content`
-subresource in the workspace where the APIExport is defined. The RBAC setup has two layers:
+The system uses kcp's `permissionClaims` to access resources in provider workspaces
+through the dep-ctrl APIExport's virtual workspace, combined with bootstrapped RBAC
+in the root and dep-ctrl workspaces.
 
-#### Static prerequisite: `workspaces/content` in root
+#### permissionClaims on the dep-ctrl APIExport
 
-The webhook service account needs `workspaces/content` access in the root workspace to
-enter child workspaces through APIExport virtual workspace endpoints. This must be
-provisioned at deployment time (e.g., via bootstrap RBAC or Helm chart):
+The dep-ctrl APIExport declares `permissionClaims` for:
+- `validatingwebhookconfigurations` (admissionregistration.k8s.io) -- to install webhooks
+- `clusterroles` (rbac.authorization.k8s.io) -- to manage webhook RBAC
+- `clusterrolebindings` (rbac.authorization.k8s.io) -- to manage webhook RBAC
+
+Provider workspaces that bind to the dep-ctrl APIExport must **accept** these claims
+in their `APIBinding` spec. This grants the dep-ctrl service provider (the controller)
+access to these resources in binding workspaces through the virtual workspace.
+
+#### Bootstrap RBAC (static, applied at deployment)
+
+**Root workspace** -- both components need `workspaces/content` access to enter child
+workspaces. The controller additionally needs `workspaces` read access to resolve
+workspace paths to logical cluster names:
 
 ```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: dependency-controller-webhook
+# Controller
 rules:
   - apiGroups: ["core.kcp.io"]
     resources: ["workspaces/content"]
     verbs: ["access"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: dependency-controller-webhook
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: dependency-controller-webhook
-subjects:
-  - apiGroup: rbac.authorization.k8s.io
-    kind: User
-    name: "system:serviceaccount:<namespace>:<webhook-sa-name>"
+  - apiGroups: ["tenancy.kcp.io"]
+    resources: ["workspaces"]
+    verbs: ["get", "list", "watch"]
+
+# Webhook
+rules:
+  - apiGroups: ["core.kcp.io"]
+    resources: ["workspaces/content"]
+    verbs: ["access"]
 ```
 
-This grant is static and does not change as rules are added or removed.
+**Dep-ctrl workspace** -- both components need `apiexportendpointslices` read access
+for VW URL discovery. The controller needs full CRUD on `apiexports/content` to
+manage resources in binding workspaces via the VW. The webhook only needs read access:
 
-#### Dynamic: `apiexports/content` per provider workspace
+```yaml
+# Controller
+rules:
+  - apiGroups: ["apis.kcp.io"]
+    resources: ["apiexportendpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apis.kcp.io"]
+    resources: ["apiexports/content"]
+    resourceNames: ["dependencies.opendefense.cloud"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
 
-When the controller processes a `DependencyRule`, it reads the rule's
-`spec.dependent.apiExportRef` to determine which provider workspace hosts the
-dependent resource's APIExport. It then creates a `ClusterRole` and
-`ClusterRoleBinding` in that workspace granting the webhook:
+# Webhook
+rules:
+  - apiGroups: ["apis.kcp.io"]
+    resources: ["apiexportendpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apis.kcp.io"]
+    resources: ["apiexports/content"]
+    resourceNames: ["dependencies.opendefense.cloud"]
+    verbs: ["get", "list", "watch"]
+```
 
+#### Dynamic RBAC (managed by the controller)
+
+When the controller processes a `DependencyRule`, it creates a `ClusterRole` and
+`ClusterRoleBinding` in the dependent's provider workspace granting the webhook:
 - `get`/`list`/`watch` on `apiexports/content` scoped to the specific APIExport name
-- `get`/`list`/`watch` on `apiexportendpointslices` (needed for VW URL discovery)
+- `get`/`list`/`watch` on `apiexportendpointslices` (for VW URL discovery)
 
-For example, if a `DependencyRule` declares that `VirtualMachine` (from
-`compute.example.com` in `root:compute-provider`) depends on VPCs, the controller
-creates RBAC in `root:compute-provider` granting access to `apiexports/content`
-for `compute.example.com`. This allows the webhook to read VirtualMachines across
-all consumer workspaces through the compute APIExport's virtual workspace.
-
-When multiple rules reference the same provider workspace, their APIExport names
-are merged into a single ClusterRole. When the last rule referencing a workspace is
-deleted, the ClusterRole and ClusterRoleBinding are removed.
-
-The webhook does **not** receive RBAC in the dependency target's workspace
-(e.g., `root:network-provider`). It only needs access to the dependent's APIExport
-virtual workspace to index the dependent resources.
+This RBAC is created through the dep-ctrl VW (authorized by permissionClaims),
+not via direct workspace access.
 
 ## Development
 

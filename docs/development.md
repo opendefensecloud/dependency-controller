@@ -21,9 +21,9 @@ config/
 docs/                       Documentation
 internal/
   controller/
-    dependencyrule_controller.go   Multicluster DependencyRule reconciler
+    dependencyrule_controller.go   Reconciler + workspace resolver (VW routing)
     webhook_installer.go           Manages ValidatingWebhookConfigurations
-    rbac_manager.go                Manages ClusterRole/Binding in system:master
+    rbac_manager.go                Manages ClusterRole/Binding via dep-ctrl VW
   fieldpath/
     fieldpath.go                   Dot-notation field path resolver
   webhook/
@@ -134,20 +134,37 @@ kubectl apply -k config/kcp/
 ```
 
 This creates the `APIResourceSchema` objects and the
-`dependencies.opendefense.cloud` APIExport.
+`dependencies.opendefense.cloud` APIExport. The APIExport includes
+`permissionClaims` for `validatingwebhookconfigurations`, `clusterroles`, and
+`clusterrolebindings` -- these authorize the controller to manage webhooks and
+RBAC in provider workspaces through the virtual workspace.
 
-### 2. Apply bootstrap RBAC in root workspace
+### 2. Apply bootstrap RBAC
 
-The webhook service account needs `workspaces/content` access in the root workspace.
-Apply this once with a privileged identity:
+Bootstrap RBAC is required in two workspaces, applied with a privileged identity:
+
+**Root workspace** -- both components need `workspaces/content` access to enter
+child workspaces. The controller also needs `workspaces` read access for
+workspace path resolution:
 
 ```sh
 kubectl ws root
 kubectl apply -f test/fixtures/root-rbac-bootstrap.yaml
 ```
 
-Adjust the service account name in the `ClusterRoleBinding` subject to match your
-deployment's webhook service account (default: `system:serviceaccount:dependency-system:dependency-webhook`).
+**Dep-ctrl workspace** -- the controller needs full CRUD on `apiexports/content`
+(to manage claimed resources through the VW). The webhook needs read-only access
+(to watch DependencyRules). Both need `apiexportendpointslices` read access for
+VW URL discovery:
+
+```sh
+kubectl ws root:dep-ctrl
+kubectl apply -f test/fixtures/depctrl-rbac-bootstrap.yaml
+```
+
+Adjust the service account names in the `ClusterRoleBinding` subjects to match
+your deployment (defaults: `system:serviceaccount:dependency-system:dependency-controller`
+and `system:serviceaccount:dependency-system:dependency-webhook`).
 
 ### 3. Run the controller
 
@@ -161,8 +178,10 @@ bin/dependency-controller \
   --webhook-service-account-namespace=dependency-system
 ```
 
-The controller will dynamically create `apiexports/content` RBAC in each provider
-workspace as `DependencyRule` objects are created.
+The controller routes all provider workspace operations through the dep-ctrl
+APIExport's virtual workspace. It resolves workspace paths to logical cluster
+names by reading `Workspace` objects from root, then uses
+`<vw-url>/clusters/<logical-cluster-name>` for webhook and RBAC operations.
 
 ### 4. Run the webhook server
 
@@ -178,12 +197,29 @@ bin/dependency-webhook \
 
 Each API provider that wants deletion protection:
 
-1. Binds to the dep-ctrl APIExport in their provider workspace
+1. Binds to the dep-ctrl APIExport in their provider workspace, **accepting the
+   permissionClaims** (required for the controller to manage webhooks and RBAC):
+   ```yaml
+   spec:
+     permissionClaims:
+       - group: "admissionregistration.k8s.io"
+         resource: "validatingwebhookconfigurations"
+         selector: { matchAll: true }
+         state: Accepted
+       - group: "rbac.authorization.k8s.io"
+         resource: "clusterroles"
+         selector: { matchAll: true }
+         state: Accepted
+       - group: "rbac.authorization.k8s.io"
+         resource: "clusterrolebindings"
+         selector: { matchAll: true }
+         state: Accepted
+   ```
 2. Creates a `DependencyRule` declaring which of their resources depend on which
    other resources
 
 The controller then automatically installs a `ValidatingWebhookConfiguration`
-in each dependency provider's workspace and creates `apiexports/content` RBAC in
-the dependent's provider workspace. The webhook server picks up the rule, starts
-an indexed cache for the dependent resource type, and begins serving admission
-requests.
+in each dependency provider's workspace (via the VW) and creates
+`apiexports/content` RBAC in the dependent's provider workspace. The webhook
+server picks up the rule, starts an indexed cache for the dependent resource
+type, and begins serving admission requests.

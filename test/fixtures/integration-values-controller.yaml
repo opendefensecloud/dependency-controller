@@ -5,7 +5,7 @@ image:
   pullPolicy: Never
 
 kubeconfig:
-  secretName: kcp-kubeconfig
+  secretName: kcp-controller-kubeconfig
   key: kubeconfig
 
 kcpBaseHost: "https://kcp.kcp-system.svc.cluster.local:6443"

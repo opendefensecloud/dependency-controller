@@ -9,7 +9,8 @@ replicas: 1
 
 apiExportName: dependencies.opendefense.cloud
 
-# Base kcp host URL (without workspace path). If empty, derived from kubeconfig.
+# Base kcp host URL (without workspace path). Used to resolve workspace paths
+# to logical cluster names. If empty, derived from kubeconfig.
 kcpBaseHost: ""
 
 # Secret containing a kubeconfig for connecting to kcp.

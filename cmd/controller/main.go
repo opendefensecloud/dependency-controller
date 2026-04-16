@@ -97,16 +97,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create RBAC manager. Uses the base config to create per-workspace clients
-	// for managing apiexports/content RBAC in each provider workspace.
+	// Create RBAC manager.
 	rbacMgr := &controller.RBACManager{
-		BaseConfig:              baseCfg,
 		ServiceAccountName:      webhookServiceAccountName,
 		ServiceAccountNamespace: webhookServiceAccountNamespace,
 	}
 
 	// Register the multicluster DependencyRule reconciler.
 	reconciler := controller.NewDependencyRuleReconciler(mgr)
+	reconciler.APIExportName = apiExportName
+	reconciler.BaseConfig = baseCfg
 	reconciler.RBACManager = rbacMgr
 
 	// Wire up webhook installer if configured.
@@ -119,7 +119,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		reconciler.WebhookInstaller = controller.NewWebhookInstaller(baseCfg, webhookURL, caBundle)
+		reconciler.WebhookInstaller = controller.NewWebhookInstaller(nil, webhookURL, caBundle)
 	}
 
 	if err := mcbuilder.ControllerManagedBy(mgr).
