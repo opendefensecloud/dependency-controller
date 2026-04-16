@@ -108,9 +108,8 @@ docker-push: ## Push the Docker image.
 	$(DOCKER) push $(CONTROLLER_IMG)
 
 .PHONY: helm-package
-helm-package: manifests ## Package Helm charts.
+helm-package: manifests ## Package Helm chart.
 	helm package charts/dependency-controller
-	helm package charts/dependency-webhook
 
 ##@ Testing
 

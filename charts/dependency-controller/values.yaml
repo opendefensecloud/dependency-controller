@@ -5,55 +5,89 @@ image:
 
 imagePullSecrets: []
 
-replicas: 1
-
 apiExportName: dependencies.opendefense.cloud
 
 # Base kcp host URL (without workspace path). Used to resolve workspace paths
 # to logical cluster names. If empty, derived from kubeconfig.
 kcpBaseHost: ""
 
-# Secret containing a kubeconfig for connecting to kcp.
-# Required when the controller runs outside kcp (e.g., in a management cluster).
-kubeconfig:
-  secretName: ""
-  key: "kubeconfig"
+# Controller configuration.
+controller:
+  replicas: 1
 
-# Webhook configuration for ValidatingWebhookConfiguration installation.
-webhook:
-  # URL of the dependency-webhook server.
-  # Example: https://dependency-webhook.dependency-system.svc:443/validate
-  url: ""
-
-  # Name of the Secret containing the webhook's TLS certificate (with ca.crt key).
-  # When using cert-manager with the dependency-webhook chart, this is
-  # typically "<webhook-release>-dependency-webhook-tls".
-  caBundle:
+  # Secret containing a kubeconfig for connecting to kcp.
+  # Required when the controller runs outside kcp (e.g., in a management cluster).
+  kubeconfig:
     secretName: ""
+    key: "kubeconfig"
 
-  # Webhook server's service account. The controller creates RBAC in provider
-  # workspaces granting this identity apiexports/content access so the webhook
-  # can read dependent resources via virtual workspaces.
   serviceAccount:
+    create: true
+    name: dependency-controller
+    annotations: {}
+
+  healthProbeBindAddress: ":8081"
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 100m
+      memory: 64Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Webhook server configuration.
+webhook:
+  replicas: 1
+
+  port: 9443
+  tlsCertDir: /etc/webhook-tls
+
+  # Secret containing a kubeconfig for connecting to kcp.
+  kubeconfig:
+    secretName: ""
+    key: "kubeconfig"
+
+  serviceAccount:
+    create: true
     name: dependency-webhook
-    namespace: ""
+    annotations: {}
 
-serviceAccount:
-  create: true
-  name: dependency-controller
-  namespace: ""
-  annotations: {}
+  service:
+    port: 443
+    # Set to NodePort and specify nodePort to expose the webhook outside the cluster.
+    type: ClusterIP
+    nodePort: ""
 
-healthProbeBindAddress: ":8081"
+  tls:
+    # Use an existing Secret containing tls.crt, tls.key, and ca.crt.
+    # When set, cert-manager is not used regardless of certManager.enabled.
+    existingSecret: ""
 
-resources:
-  limits:
-    cpu: 500m
-    memory: 128Mi
-  requests:
-    cpu: 100m
-    memory: 64Mi
+    # Use cert-manager to issue a TLS certificate.
+    certManager:
+      enabled: true
+      # issuerRef is required when certManager is enabled.
+      issuerRef:
+        name: ""
+        kind: ClusterIssuer
+      # Additional DNS names to include in the certificate.
+      additionalDnsNames: []
 
-nodeSelector: {}
-tolerations: []
-affinity: {}
+  healthProbeBindAddress: ":8081"
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 100m
+      memory: 64Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

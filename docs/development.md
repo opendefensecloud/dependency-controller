@@ -13,8 +13,7 @@ cmd/
   controller/               Controller entrypoint
   webhook/                  Webhook server entrypoint
 charts/
-  dependency-controller/    Helm chart for the controller
-  dependency-webhook/       Helm chart for the webhook server
+  dependency-controller/    Helm chart (deploys both controller and webhook)
 config/
   crds/                     Generated CRDs (intermediate, from controller-gen)
   kcp/                      Generated APIResourceSchemas + APIExport (from apigen)
@@ -58,7 +57,7 @@ hasn't changed, avoiding unnecessary churn.
 ```sh
 make build            # Build both binaries to bin/
 make docker-build     # Build Docker image
-make helm-package     # Package Helm charts
+make helm-package     # Package Helm chart
 ```
 
 ### Run
@@ -109,8 +108,9 @@ webhook server with a self-signed CA. It verifies the full lifecycle:
 
 The e2e tests (`test/e2e/`) run against a real kind cluster with kcp and
 cert-manager deployed via Helm. They build the Docker image, load it into
-kind, deploy the Helm charts, and exercise the full system including TLS
-webhook dispatch through kcp's admission pipeline.
+kind, deploy the Helm chart (which includes both controller and webhook), and
+exercise the full system including TLS webhook dispatch through kcp's admission
+pipeline.
 
 Tool paths can be configured via environment variables (`KIND`, `KUBECTL`,
 `HELM`, `DOCKER`) with fallback to PATH lookup.
@@ -166,34 +166,25 @@ Adjust the service account names in the `ClusterRoleBinding` subjects to match
 your deployment (defaults: `system:serviceaccount:dependency-system:dependency-controller`
 and `system:serviceaccount:dependency-system:dependency-webhook`).
 
-### 3. Run the controller
+### 3. Deploy with Helm
+
+The chart deploys both the controller and webhook server as separate Deployments:
 
 ```sh
-bin/dependency-controller \
-  --api-export-name=dependencies.opendefense.cloud \
-  --kcp-base-host=https://kcp.example.com:6443 \
-  --webhook-url=https://dependency-webhook.ns.svc:443/validate \
-  --webhook-ca-bundle-path=/path/to/ca.pem \
-  --webhook-service-account-name=dependency-webhook \
-  --webhook-service-account-namespace=dependency-system
+helm install dep-ctrl charts/dependency-controller \
+  --namespace dependency-system --create-namespace \
+  --set kcpBaseHost=https://kcp.example.com:6443 \
+  --set controller.kubeconfig.secretName=kcp-controller-kubeconfig \
+  --set webhook.kubeconfig.secretName=kcp-webhook-kubeconfig \
+  --set webhook.tls.certManager.issuerRef.name=my-issuer
 ```
 
-The controller routes all provider workspace operations through the dep-ctrl
-APIExport's virtual workspace. It resolves workspace paths to logical cluster
-names by reading `Workspace` objects from root, then uses
-`<vw-url>/clusters/<logical-cluster-name>` for webhook and RBAC operations.
+The controller automatically discovers the webhook service URL and CA bundle
+from the co-deployed webhook resources. It routes all provider workspace
+operations through the dep-ctrl APIExport's virtual workspace, resolving
+workspace paths to logical cluster names via root Workspace objects.
 
-### 4. Run the webhook server
-
-```sh
-bin/dependency-webhook \
-  --api-export-name=dependencies.opendefense.cloud \
-  --kcp-base-host=https://kcp.example.com:6443 \
-  --tls-cert-dir=/etc/webhook-tls \
-  --webhook-port=9443
-```
-
-### 5. Provider setup
+### 4. Provider setup
 
 Each API provider that wants deletion protection:
 

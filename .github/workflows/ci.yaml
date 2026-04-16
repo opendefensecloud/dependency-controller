@@ -48,6 +48,4 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Helm lint
-        run: |
-          helm lint charts/dependency-controller
-          helm lint charts/dependency-webhook
+        run: helm lint charts/dependency-controller

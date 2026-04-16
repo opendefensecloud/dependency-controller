@@ -660,17 +660,10 @@ func deployCharts() {
 	createKubeconfigSecret("kcp-controller-kubeconfig", controllerKubeconfigPath)
 	createKubeconfigSecret("kcp-webhook-kubeconfig", webhookKubeconfigPath)
 
-	run(helmBin, "upgrade", "--install", "dep-webhook",
-		filepath.Join(rootDir, "charts/dependency-webhook"),
-		"--namespace", depNamespace,
-		"--values", filepath.Join(fixturesDir, "integration-values-webhook.yaml"),
-		"--wait", "--timeout", "120s",
-	)
-
 	run(helmBin, "upgrade", "--install", "dep-ctrl",
 		filepath.Join(rootDir, "charts/dependency-controller"),
 		"--namespace", depNamespace,
-		"--values", filepath.Join(fixturesDir, "integration-values-controller.yaml"),
+		"--values", filepath.Join(fixturesDir, "integration-values.yaml"),
 		"--wait", "--timeout", "120s",
 	)
 }

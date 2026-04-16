@@ -1,0 +1,30 @@
+# Values for integration testing — both components deployed in kind, connecting to kcp server directly.
+image:
+  repository: dependency-controller
+  tag: integration-test
+  pullPolicy: Never
+
+kcpBaseHost: "https://kcp.kcp-system.svc.cluster.local:6443"
+
+controller:
+  kubeconfig:
+    secretName: kcp-controller-kubeconfig
+    key: kubeconfig
+
+webhook:
+  kubeconfig:
+    secretName: kcp-webhook-kubeconfig
+    key: kubeconfig
+
+  port: 9443
+
+  service:
+    type: ClusterIP
+    port: 443
+
+  tls:
+    certManager:
+      enabled: true
+      issuerRef:
+        name: selfsigned
+        kind: ClusterIssuer

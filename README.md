@@ -74,8 +74,8 @@ spec:
 
 ### Two Binaries
 
-The system runs as two independently deployable binaries that both watch
-`DependencyRule` objects via the dep-ctrl APIExport:
+The system runs as two binaries, deployed together via a single Helm chart, that
+both watch `DependencyRule` objects via the dep-ctrl APIExport:
 
 **Controller** (`cmd/controller`) -- handles infrastructure setup:
 - Installs `ValidatingWebhookConfiguration` in each provider workspace whose

@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "dependency-controller.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicas }}
+  replicas: {{ .Values.controller.replicas }}
   selector:
     matchLabels:
       {{- include "dependency-controller.selectorLabels" . | nindent 6 }}
@@ -30,19 +30,15 @@ spec:
             {{- if .Values.kcpBaseHost }}
             - --kcp-base-host={{ .Values.kcpBaseHost }}
             {{- end }}
-            - --webhook-service-account-name={{ .Values.webhook.serviceAccount.name }}
-            - --webhook-service-account-namespace={{ .Values.webhook.serviceAccount.namespace | default .Release.Namespace }}
-            {{- if .Values.webhook.url }}
-            - --webhook-url={{ .Values.webhook.url }}
-            {{- end }}
-            {{- if .Values.webhook.caBundle.secretName }}
+            - --webhook-service-account-name={{ include "dependency-controller.webhook.serviceAccountName" . }}
+            - --webhook-service-account-namespace={{ .Release.Namespace }}
+            - --webhook-url=https://{{ include "dependency-controller.webhook.serviceFQDN" . }}:{{ .Values.webhook.service.port }}/validate
             - --webhook-ca-bundle-path=/etc/webhook-ca/ca.crt
-            {{- end }}
-            - --health-probe-bind-address={{ .Values.healthProbeBindAddress }}
-          {{- if .Values.kubeconfig.secretName }}
+            - --health-probe-bind-address={{ .Values.controller.healthProbeBindAddress }}
+          {{- if .Values.controller.kubeconfig.secretName }}
           env:
             - name: KUBECONFIG
-              value: /etc/kcp-kubeconfig/{{ .Values.kubeconfig.key }}
+              value: /etc/kcp-kubeconfig/{{ .Values.controller.kubeconfig.key }}
           {{- end }}
           livenessProbe:
             httpGet:
@@ -53,43 +49,39 @@ spec:
               path: /readyz
               port: 8081
           volumeMounts:
-            {{- if .Values.kubeconfig.secretName }}
+            {{- if .Values.controller.kubeconfig.secretName }}
             - name: kcp-kubeconfig
               mountPath: /etc/kcp-kubeconfig
               readOnly: true
             {{- end }}
-            {{- if .Values.webhook.caBundle.secretName }}
             - name: webhook-ca
               mountPath: /etc/webhook-ca
               readOnly: true
-            {{- end }}
-          {{- with .Values.resources }}
+          {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
-        {{- if .Values.kubeconfig.secretName }}
+        {{- if .Values.controller.kubeconfig.secretName }}
         - name: kcp-kubeconfig
           secret:
-            secretName: {{ .Values.kubeconfig.secretName }}
+            secretName: {{ .Values.controller.kubeconfig.secretName }}
         {{- end }}
-        {{- if .Values.webhook.caBundle.secretName }}
         - name: webhook-ca
           secret:
-            secretName: {{ .Values.webhook.caBundle.secretName }}
+            secretName: {{ include "dependency-controller.webhook.tlsSecretName" . }}
             items:
               - key: ca.crt
                 path: ca.crt
-        {{- end }}
-      {{- with .Values.nodeSelector }}
+      {{- with .Values.controller.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- with .Values.controller.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with .Values.controller.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

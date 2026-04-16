@@ -68,18 +68,14 @@ jobs:
       - name: Set chart versions from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for chart in charts/dependency-controller charts/dependency-webhook; do
-            sed -i "s/^version:.*/version: ${VERSION}/" "${chart}/Chart.yaml"
-            sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" "${chart}/Chart.yaml"
-          done
+          sed -i "s/^version:.*/version: ${VERSION}/" charts/dependency-controller/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/dependency-controller/Chart.yaml
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
 
-      - name: Push Helm charts to GHCR
+      - name: Push Helm chart to GHCR
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          for chart in dependency-controller dependency-webhook; do
-            helm package "charts/${chart}"
-            helm push "${chart}-${VERSION}.tgz" "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts"
-          done
+          helm package charts/dependency-controller
+          helm push "dependency-controller-${VERSION}.tgz" "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts"

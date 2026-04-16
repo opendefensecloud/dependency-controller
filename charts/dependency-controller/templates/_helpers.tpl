@@ -25,12 +25,47 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "dependency-controller.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "dependency-controller.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: controller
 {{- end }}
 
 {{- define "dependency-controller.serviceAccountName" -}}
-{{- if .Values.serviceAccount.create }}
-{{- default (include "dependency-controller.fullname" .) .Values.serviceAccount.name }}
+{{- if .Values.controller.serviceAccount.create }}
+{{- default (include "dependency-controller.fullname" .) .Values.controller.serviceAccount.name }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.name }}
+{{- default "default" .Values.controller.serviceAccount.name }}
 {{- end }}
+{{- end }}
+
+{{/*
+Webhook helpers
+*/}}
+
+{{- define "dependency-controller.webhook.fullname" -}}
+{{- printf "%s-webhook" (include "dependency-controller.fullname" .) }}
+{{- end }}
+
+{{- define "dependency-controller.webhook.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "dependency-controller.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: webhook
+{{- end }}
+
+{{- define "dependency-controller.webhook.serviceAccountName" -}}
+{{- if .Values.webhook.serviceAccount.create }}
+{{- default (include "dependency-controller.webhook.fullname" .) .Values.webhook.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.webhook.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{- define "dependency-controller.webhook.tlsSecretName" -}}
+{{- if .Values.webhook.tls.existingSecret }}
+{{- .Values.webhook.tls.existingSecret }}
+{{- else }}
+{{- printf "%s-tls" (include "dependency-controller.webhook.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{- define "dependency-controller.webhook.serviceFQDN" -}}
+{{ include "dependency-controller.webhook.fullname" . }}.{{ .Release.Namespace }}.svc
 {{- end }}

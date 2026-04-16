@@ -1,6 +1,6 @@
 apiVersion: v2
 name: dependency-controller
-description: Dependency controller for kcp — manages webhook installation and RBAC for cross-resource dependency protection.
+description: Dependency controller and webhook for kcp — manages cross-resource dependency protection via admission webhooks.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

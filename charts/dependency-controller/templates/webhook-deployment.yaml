@@ -1,24 +1,24 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "dependency-webhook.fullname" . }}
+  name: {{ include "dependency-controller.webhook.fullname" . }}
   labels:
-    {{- include "dependency-webhook.labels" . | nindent 4 }}
+    {{- include "dependency-controller.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicas }}
+  replicas: {{ .Values.webhook.replicas }}
   selector:
     matchLabels:
-      {{- include "dependency-webhook.selectorLabels" . | nindent 6 }}
+      {{- include "dependency-controller.webhook.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "dependency-webhook.selectorLabels" . | nindent 8 }}
+        {{- include "dependency-controller.webhook.selectorLabels" . | nindent 8 }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "dependency-webhook.serviceAccountName" . }}
+      serviceAccountName: {{ include "dependency-controller.webhook.serviceAccountName" . }}
       containers:
         - name: webhook
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -30,16 +30,16 @@ spec:
             {{- if .Values.kcpBaseHost }}
             - --kcp-base-host={{ .Values.kcpBaseHost }}
             {{- end }}
-            - --webhook-port={{ .Values.webhookPort }}
-            - --tls-cert-dir={{ .Values.tlsCertDir }}
-            - --health-probe-bind-address={{ .Values.healthProbeBindAddress }}
-          {{- if .Values.kubeconfig.secretName }}
+            - --webhook-port={{ .Values.webhook.port }}
+            - --tls-cert-dir={{ .Values.webhook.tlsCertDir }}
+            - --health-probe-bind-address={{ .Values.webhook.healthProbeBindAddress }}
+          {{- if .Values.webhook.kubeconfig.secretName }}
           env:
             - name: KUBECONFIG
-              value: /etc/kcp-kubeconfig/{{ .Values.kubeconfig.key }}
+              value: /etc/kcp-kubeconfig/{{ .Values.webhook.kubeconfig.key }}
           {{- end }}
           ports:
-            - containerPort: {{ .Values.webhookPort }}
+            - containerPort: {{ .Values.webhook.port }}
               name: https
               protocol: TCP
           livenessProbe:
@@ -52,35 +52,35 @@ spec:
               port: 8081
           volumeMounts:
             - name: tls
-              mountPath: {{ .Values.tlsCertDir }}
+              mountPath: {{ .Values.webhook.tlsCertDir }}
               readOnly: true
-            {{- if .Values.kubeconfig.secretName }}
+            {{- if .Values.webhook.kubeconfig.secretName }}
             - name: kcp-kubeconfig
               mountPath: /etc/kcp-kubeconfig
               readOnly: true
             {{- end }}
-          {{- with .Values.resources }}
+          {{- with .Values.webhook.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
         - name: tls
           secret:
-            secretName: {{ include "dependency-webhook.tlsSecretName" . }}
-        {{- if .Values.kubeconfig.secretName }}
+            secretName: {{ include "dependency-controller.webhook.tlsSecretName" . }}
+        {{- if .Values.webhook.kubeconfig.secretName }}
         - name: kcp-kubeconfig
           secret:
-            secretName: {{ .Values.kubeconfig.secretName }}
+            secretName: {{ .Values.webhook.kubeconfig.secretName }}
         {{- end }}
-      {{- with .Values.nodeSelector }}
+      {{- with .Values.webhook.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- with .Values.webhook.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with .Values.webhook.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
