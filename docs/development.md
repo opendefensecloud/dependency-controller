@@ -8,22 +8,30 @@
 ## Project Structure
 
 ```
-api/v1alpha1/           Go types for DependencyRule and Dependency
-cmd/controller/         Controller entrypoint
+api/v1alpha1/               Go types for DependencyRule
+cmd/
+  controller/               Controller entrypoint
+  webhook/                  Webhook server entrypoint
+charts/
+  dependency-controller/    Helm chart for the controller
+  dependency-webhook/       Helm chart for the webhook server
 config/
-  crds/                 Generated CRDs (intermediate, from controller-gen)
-  kcp/                  Generated APIResourceSchemas + APIExport (from apigen)
-docs/                   Documentation
+  crds/                     Generated CRDs (intermediate, from controller-gen)
+  kcp/                      Generated APIResourceSchemas + APIExport (from apigen)
+docs/                       Documentation
 internal/
   controller/
     dependencyrule_controller.go   Multicluster DependencyRule reconciler
-    dependent_controller.go        Dependent resource reconciler (creates Dependencies)
     webhook_installer.go           Manages ValidatingWebhookConfigurations
-  webhook/
-    deletion_validator.go          Admission webhook handler
+    rbac_manager.go                Manages ClusterRole/Binding in system:master
+  fieldpath/
     fieldpath.go                   Dot-notation field path resolver
+  webhook/
+    rule_cache_manager.go          Per-rule indexed cache lifecycle manager
+    rule_registry.go               Thread-safe registry of rule caches
+    deletion_validator.go          Admission webhook handler
 test/
-  e2e/                  End-to-end tests (run against real kcp)
+  e2e/                  End-to-end tests (kind + kcp + helm)
   fixtures/             YAML fixtures for test provider schemas
 ```
 
@@ -48,16 +56,24 @@ hasn't changed, avoiding unnecessary churn.
 ### Build
 
 ```sh
-make build         # Build binary to bin/dependency-controller
-make docker-build  # Build Docker image
+make build            # Build both binaries to bin/
+make docker-build     # Build Docker image
+make helm-package     # Package Helm charts
+```
+
+### Run
+
+```sh
+make run-controller   # Run the controller from source
+make run-webhook      # Run the webhook server from source
 ```
 
 ### Test
 
 ```sh
-make test          # All tests (unit + e2e)
-make test-unit     # Unit tests only
-make test-e2e      # E2E tests against a local kcp instance
+make test             # Unit + integration tests (requires kcp binary, excludes e2e)
+make test-e2e         # E2E tests (requires kind, helm, docker)
+make clean-e2e        # Remove kind cluster from e2e tests
 ```
 
 ### Lint & Format
@@ -68,25 +84,36 @@ make lint   # Run golangci-lint
 make vet    # Run go vet
 ```
 
-## E2E Tests
+## Integration Tests
 
-The e2e tests spin up a real kcp instance and create a 5-workspace topology:
+The integration tests (`internal/controller/integration_test.go`) use
+[kcp envtest](https://github.com/kcp-dev/multicluster-provider/tree/main/envtest)
+to spin up a real kcp instance in-process and create a 5-workspace topology:
 
-1. **dep-ctrl** -- hosts the dependency-controller's APIExport
+1. **dep-ctrl** -- hosts the DependencyRule APIExport
 2. **network-provider** -- exports VPCs
 3. **compute-provider** -- exports VirtualMachines, creates a DependencyRule
 4. **consumer1** -- binds to all three, where test resources are created
 5. **consumer2** -- binds to all three, used to verify no cross-workspace leakage
 
-The test also starts an HTTPS webhook server with a self-signed CA, wires the
-`WebhookInstaller` into the DependencyRule reconciler, and verifies the full
-lifecycle:
+The test starts both the controller reconciler (with `WebhookInstaller`) and the
+webhook's `RuleCacheManager` on the same multicluster manager, plus an HTTPS
+webhook server with a self-signed CA. It verifies the full lifecycle:
 
-- Dependency auto-creation when a VM references a VPC
-- Webhook blocks VPC deletion while Dependencies exist
-- Dependency cleanup when the VM is deleted
-- Webhook allows VPC deletion after cleanup
+- Webhook blocks VPC deletion while VMs reference it
+- Consumer2's VPC is unaffected (cross-workspace isolation)
+- Webhook allows VPC deletion after the VM is deleted
 - Webhook removal when the DependencyRule is deleted
+
+## E2E Tests
+
+The e2e tests (`test/e2e/`) run against a real kind cluster with kcp and
+cert-manager deployed via Helm. They build the Docker image, load it into
+kind, deploy the Helm charts, and exercise the full system including TLS
+webhook dispatch through kcp's admission pipeline.
+
+Tool paths can be configured via environment variables (`KIND`, `KUBECTL`,
+`HELM`, `DOCKER`) with fallback to PATH lookup.
 
 ### Fixtures
 
@@ -112,19 +139,25 @@ This creates the `APIResourceSchema` objects and the
 ### 2. Run the controller
 
 ```sh
-# Point kubeconfig at the dep-ctrl workspace
-make run
-```
-
-Or with explicit flags:
-
-```sh
 bin/dependency-controller \
   --api-export-name=dependencies.opendefense.cloud \
-  --kcp-base-host=https://kcp.example.com:6443
+  --kcp-base-host=https://kcp.example.com:6443 \
+  --webhook-url=https://dependency-webhook.ns.svc:443/validate \
+  --webhook-ca-bundle-path=/path/to/ca.pem \
+  --root-shard-host=https://root-shard:6443
 ```
 
-### 3. Provider setup
+### 3. Run the webhook server
+
+```sh
+bin/dependency-webhook \
+  --api-export-name=dependencies.opendefense.cloud \
+  --kcp-base-host=https://kcp.example.com:6443 \
+  --tls-cert-dir=/etc/webhook-tls \
+  --webhook-port=9443
+```
+
+### 4. Provider setup
 
 Each API provider that wants deletion protection:
 
@@ -132,10 +165,7 @@ Each API provider that wants deletion protection:
 2. Creates a `DependencyRule` declaring which of their resources depend on which
    other resources
 
-The controller then automatically:
-
-- Starts watching the dependent resource type via the provider's APIExport
-- Installs a `ValidatingWebhookConfiguration` in each dependency provider's
-  workspace
-- Creates `Dependency` marker objects in consumer workspaces as resources are
-  created
+The controller then automatically installs a `ValidatingWebhookConfiguration`
+in each dependency provider's workspace and updates the RBAC ClusterRole in
+`system:master`. The webhook server picks up the rule, starts an indexed cache
+for the dependent resource type, and begins serving admission requests.

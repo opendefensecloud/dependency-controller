@@ -40,7 +40,7 @@ graph LR
     end
 
     subgraph SM["system:master"]
-        SMROLE["ClusterRole:<br/>dependency-controller"]
+        SMROLE["ClusterRole:<br/>dependency-controller<br/><i>(grants webhook read access)</i>"]
     end
 
     subgraph CW["Consumer WS"]
@@ -70,8 +70,9 @@ objects that declare how their resources reference other providers' resources.
 **Consumer workspaces** -- bind to provider exports and create the actual
 resources (VPCs, VMs). Consumers don't interact with the dependency system directly.
 
-**system:master** -- hosts a `ClusterRole` granting the controller read access to
-dependent resource types. Dynamically updated as rules change.
+**system:master** -- hosts a `ClusterRole` granting the webhook server read access
+to dependent resource types across all workspaces. Dynamically updated by the
+controller as rules change.
 
 ## Component Overview
 
@@ -80,7 +81,7 @@ flowchart TD
     subgraph Controller["Controller Binary (cmd/controller)"]
         DR["DependencyRule Reconciler"]
         DR -->|delegates to| WI["Webhook Installer"]
-        DR -->|updates| RBAC["RBAC Manager"]
+        DR -->|updates| RBAC["RBAC Manager<br/><i>ClusterRole for webhook in system:master</i>"]
     end
 
     subgraph Webhook["Webhook Server Binary (cmd/webhook)"]
@@ -143,8 +144,10 @@ workspace, the webhook is deleted entirely.
 #### 2. RBAC Management
 
 The [`RBACManager`](../internal/controller/rbac_manager.go) maintains a
-`ClusterRole` and `ClusterRoleBinding` in `system:master` granting the controller
-`get`/`list`/`watch` on all dependent resource types.
+`ClusterRole` and `ClusterRoleBinding` in `system:master` granting the webhook
+server `get`/`list`/`watch` on all dependent resource types. The webhook needs
+these permissions to watch dependent resources via provider APIExport virtual
+workspaces and build its indexed caches.
 
 Each reconcile calls `TrackRule(key, gvr)` with the rule's dependent GVR, then
 `Reconcile(ctx)` which builds the ClusterRole from all tracked GVRs.
