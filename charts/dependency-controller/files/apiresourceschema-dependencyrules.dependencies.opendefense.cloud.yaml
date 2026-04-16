@@ -1,0 +1,140 @@
+apiVersion: apis.kcp.io/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: v260410-d7832fa.dependencyrules.dependencies.opendefense.cloud
+spec:
+  group: dependencies.opendefense.cloud
+  names:
+    kind: DependencyRule
+    listKind: DependencyRuleList
+    plural: dependencyrules
+    singular: dependencyrule
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      description: |-
+        DependencyRule declares how a dependent resource type references other resource types.
+        Created by API providers alongside their APIExport.
+      properties:
+        apiVersion:
+          description: |-
+            APIVersion defines the versioned schema of this representation of an object.
+            Servers should convert recognized schemas to the latest internal value, and
+            may reject unrecognized values.
+            More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+          type: string
+        kind:
+          description: |-
+            Kind is a string value representing the REST resource this object represents.
+            Servers may infer this from the endpoint the client submits requests to.
+            Cannot be updated.
+            In CamelCase.
+            More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+          type: string
+        metadata:
+          type: object
+        spec:
+          description: DependencyRuleSpec defines the dependent resource and its dependencies.
+          properties:
+            dependencies:
+              description: |-
+                Dependencies lists the resource types that the dependent depends on,
+                including how each is referenced.
+              items:
+                description: DependencyTarget describes a resource type that the dependent
+                  depends on.
+                properties:
+                  apiExportRef:
+                    description: |-
+                      APIExportRef references the APIExport that provides this dependency resource type.
+                      Used by the webhook installer to register deletion protection in the correct workspace.
+                    properties:
+                      name:
+                        description: Name is the name of the APIExport.
+                        type: string
+                      path:
+                        description: Path is the workspace path where the APIExport
+                          lives (e.g., "root:compute-provider").
+                        type: string
+                    required:
+                    - name
+                    - path
+                    type: object
+                  fieldRef:
+                    description: FieldRef describes where in the dependent resource
+                      the dependency is referenced.
+                    properties:
+                      path:
+                        description: |-
+                          Path is a dot-notation path in the dependent resource pointing to the dependency's name.
+                          For example, ".spec.vpcRef.name".
+                        type: string
+                    required:
+                    - path
+                    type: object
+                  group:
+                    description: Group is the API group of the dependency resource.
+                    type: string
+                  resource:
+                    description: Resource is the plural resource name (e.g., "vpcs").
+                    type: string
+                  version:
+                    description: Version is the API version of the dependency resource.
+                    type: string
+                required:
+                - apiExportRef
+                - fieldRef
+                - group
+                - resource
+                - version
+                type: object
+              type: array
+            dependent:
+              description: Dependent identifies the resource type that holds references
+                to other resources.
+              properties:
+                apiExportRef:
+                  description: APIExportRef references the APIExport that provides
+                    this resource type.
+                  properties:
+                    name:
+                      description: Name is the name of the APIExport.
+                      type: string
+                    path:
+                      description: Path is the workspace path where the APIExport
+                        lives (e.g., "root:compute-provider").
+                      type: string
+                  required:
+                  - name
+                  - path
+                  type: object
+                group:
+                  description: Group is the API group of the dependent resource.
+                  type: string
+                kind:
+                  description: Kind is the kind of the dependent resource (e.g., "VirtualMachine").
+                  type: string
+                resource:
+                  description: Resource is the plural resource name (e.g., "virtualmachines").
+                  type: string
+                version:
+                  description: Version is the API version of the dependent resource.
+                  type: string
+              required:
+              - apiExportRef
+              - group
+              - kind
+              - resource
+              - version
+              type: object
+          required:
+          - dependencies
+          - dependent
+          type: object
+      required:
+      - spec
+      type: object
+    served: true
+    storage: true
+    subresources: {}
