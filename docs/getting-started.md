@@ -301,14 +301,60 @@ kubectl apply -f test/fixtures/apiexport-compute.test.io.yaml
 
 ### 5b. Bind providers to the dep-ctrl APIExport
 
-Each provider must bind to the dep-ctrl APIExport **and accept the
-permissionClaims**. This is what authorizes the controller to manage webhooks
-and RBAC in that provider's workspace through the virtual workspace.
+**Every provider workspace referenced in a DependencyRule must bind to the
+dep-ctrl APIExport and accept the permissionClaims.** This applies to both
+sides of the dependency relationship:
 
-Apply the binding in each provider workspace:
+- The **dependency target provider** (network-provider, which exports VPCs) --
+  the controller needs to install a `ValidatingWebhookConfiguration` there to
+  intercept VPC deletions
+- The **dependent provider** (compute-provider, which exports VMs) -- the
+  controller needs to create RBAC there granting the webhook read access to
+  VirtualMachines via the compute APIExport's virtual workspace
+
+The controller reaches both workspaces through the dep-ctrl APIExport's virtual
+workspace. In kcp, a virtual workspace can only access workspaces that bind to
+its APIExport -- and `permissionClaims` control which resource types the VW is
+allowed to manage in those workspaces. Without the binding and accepted claims,
+the controller has no access.
+
+Apply the binding in **both** provider workspaces:
 
 ```sh
-# In compute-provider
+# In network-provider (where the webhook will be installed)
+kubectl ws root:network-provider
+kubectl apply -f - <<'EOF'
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: dependencies.opendefense.cloud
+spec:
+  reference:
+    export:
+      path: root:dep-ctrl
+      name: dependencies.opendefense.cloud
+  permissionClaims:
+    - group: "admissionregistration.k8s.io"
+      resource: "validatingwebhookconfigurations"
+      verbs: ["get", "list", "watch", "create", "update", "delete"]
+      selector:
+        matchAll: true
+      state: Accepted
+    - group: "rbac.authorization.k8s.io"
+      resource: "clusterroles"
+      verbs: ["get", "list", "watch", "create", "update", "delete"]
+      selector:
+        matchAll: true
+      state: Accepted
+    - group: "rbac.authorization.k8s.io"
+      resource: "clusterrolebindings"
+      verbs: ["get", "list", "watch", "create", "update", "delete"]
+      selector:
+        matchAll: true
+      state: Accepted
+EOF
+
+# In compute-provider (where the RBAC will be created)
 kubectl ws root:compute-provider
 kubectl apply -f - <<'EOF'
 apiVersion: apis.kcp.io/v1alpha2
@@ -342,19 +388,15 @@ spec:
 EOF
 ```
 
-Repeat in the network-provider workspace (same YAML, apply with
-`kubectl ws root:network-provider`).
-
 A reference fixture is available at
 [`test/fixtures/apibinding-dependencies.opendefense.cloud.yaml`](../test/fixtures/apibinding-dependencies.opendefense.cloud.yaml)
 (replace `${DEP_CTRL_PATH}` with `root:dep-ctrl`).
 
-**Why accept permissionClaims?** Without acceptance, the controller has no
-access to the provider workspace through the virtual workspace. The claims
-grant the controller permission to:
-- Create `ValidatingWebhookConfigurations` (to install deletion protection)
-- Create `ClusterRoles` and `ClusterRoleBindings` (to grant the webhook read
-  access to the provider's APIExport virtual workspace)
+The accepted permissionClaims grant the controller permission to:
+- Create `ValidatingWebhookConfigurations` in the workspace (for deletion
+  protection)
+- Create `ClusterRoles` and `ClusterRoleBindings` in the workspace (to grant
+  the webhook read access to the provider's APIExport virtual workspace)
 
 ### 5c. Create a DependencyRule
 
