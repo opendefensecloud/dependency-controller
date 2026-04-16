@@ -115,24 +115,24 @@ helm-package: manifests ## Package Helm charts.
 ##@ Testing
 
 .PHONY: test
-test: generate ginkgo ## Run all tests.
-	$(GINKGO) -r -cover --fail-fast --require-suite -covermode count --output-dir=$(BUILD_PATH) -coverprofile=coverprofile $(testargs)
+test: generate ginkgo kcp ## Run all tests (excludes e2e).
+	TEST_KCP_ASSETS=$(LOCALBIN) $(GINKGO) -r -cover --fail-fast --require-suite -covermode count --output-dir=$(BUILD_PATH) -coverprofile=coverprofile --skip-package=test/e2e $(testargs)
 
 .PHONY: test-unit
 test-unit: generate ## Run unit tests only (no e2e).
 	$(GO) test ./internal/... ./api/... -cover $(testargs)
 
+.PHONY: test-controller
+test-controller: generate ginkgo kcp ## Run controller tests against a local kcp envtest instance.
+	TEST_KCP_ASSETS=$(LOCALBIN) $(GINKGO) -r --fail-fast -v ./internal/controller/ $(testargs)
+
 .PHONY: test-e2e
-test-e2e: generate ginkgo kcp ## Run e2e tests against a local kcp instance.
-	TEST_KCP_ASSETS=$(LOCALBIN) $(GINKGO) -r --fail-fast -v ./test/e2e/ $(testargs)
+test-e2e: ginkgo ## Run e2e tests (kind + kcp + helm).
+	$(GINKGO) -r --fail-fast -v --timeout 30m ./test/e2e/ $(testargs)
 
-.PHONY: test-integration
-test-integration: ## Run integration tests (kind + kcp + helm).
-	./test/integration/run.sh
-
-.PHONY: integration-cleanup
-integration-cleanup: ## Remove kind cluster from integration tests.
-	-$(KIND) delete cluster --name dep-ctrl-integration 2>/dev/null
+.PHONY: e2e-cleanup
+e2e-cleanup: ## Remove kind cluster from e2e tests.
+	-$(KIND) delete cluster --name dep-ctrl-e2e 2>/dev/null
 
 ##@ Tool Dependencies
 

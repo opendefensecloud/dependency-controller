@@ -2,3 +2,4 @@
 /bin/
 charts/*/files/
 *.tgz
+/coverprofile
