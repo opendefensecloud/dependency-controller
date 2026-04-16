@@ -30,8 +30,6 @@ spec:
             {{- if .Values.kcpBaseHost }}
             - --kcp-base-host={{ .Values.kcpBaseHost }}
             {{- end }}
-            - --webhook-service-account-name={{ include "dependency-controller.webhook.serviceAccountName" . }}
-            - --webhook-service-account-namespace={{ .Release.Namespace }}
             - --webhook-url=https://{{ include "dependency-controller.webhook.serviceFQDN" . }}:{{ .Values.webhook.service.port }}/validate
             - --webhook-ca-bundle-path=/etc/webhook-ca/ca.crt
             - --health-probe-bind-address={{ .Values.controller.healthProbeBindAddress }}

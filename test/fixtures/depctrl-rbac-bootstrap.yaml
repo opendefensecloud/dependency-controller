@@ -1,16 +1,15 @@
-# RBAC in the dep-ctrl workspace for the dependency-controller system.
+# RBAC in the dep-ctrl workspace for the dependency-controller.
 # Applied during setup using a bootstrap (system:masters) identity.
 #
-# Both the controller and webhook connect to the dep-ctrl workspace to:
+# The controller connects to the dep-ctrl workspace to:
 # 1. Discover the VW URL via APIExportEndpointSlice
 # 2. Access the dep-ctrl APIExport's virtual workspace (apiexports/content)
 #
-# The apiexports/content authorization is checked in the workspace where the
-# APIExport is defined, so it must be granted here (not in root).
-#
 # The controller needs full CRUD on apiexports/content because it manages
-# webhooks and RBAC in binding workspaces via the VW (using permissionClaims).
-# The webhook only needs read access to watch DependencyRules.
+# webhooks in binding workspaces via the VW (using permissionClaims).
+#
+# The webhook SA's access is granted shard-wide via system:admin RBAC
+# (see shard-admin-rbac-bootstrap.yaml) instead of per-workspace grants.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -37,29 +36,3 @@ subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: User
     name: "system:serviceaccount:dependency-system:dependency-controller"
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: dependency-controller-webhook
-rules:
-  - apiGroups: ["apis.kcp.io"]
-    resources: ["apiexportendpointslices"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apis.kcp.io"]
-    resources: ["apiexports/content"]
-    resourceNames: ["dependencies.opendefense.cloud"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: dependency-controller-webhook
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: dependency-controller-webhook
-subjects:
-  - apiGroup: rbac.authorization.k8s.io
-    kind: User
-    name: "system:serviceaccount:dependency-system:dependency-webhook"

@@ -40,13 +40,12 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		})
 	})
 
-	It("should grant webhook SA apiexports/content access for dependent resource APIExport", func() {
-		// The controller creates RBAC in the compute-provider workspace granting
-		// the webhook SA apiexports/content on the compute.test.io APIExport.
-		// This allows the webhook to read VirtualMachines across consumer
-		// workspaces via the APIExport virtual workspace.
+	It("should have shard-wide apiexports/content access via system:admin bootstrap RBAC", func() {
+		// The webhook SA has shard-wide apiexports/content and apiexportendpointslices
+		// access granted via system:admin RBAC (Bootstrap Policy Authorizer), instead
+		// of per-workspace dynamic RBAC managed by the controller.
 
-		By("waiting for webhook SA to have apiexports/content on compute.test.io in compute-provider")
+		By("verifying webhook SA has apiexports/content on compute.test.io in compute-provider")
 		waitFor(time.Minute, "webhook SA has apiexports/content on compute.test.io", func() error {
 			allowed, err := webhookSACanAccessExport(wsComputeProvider, "compute.test.io")
 			if err != nil {
@@ -58,17 +57,11 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			return nil
 		})
 
-		By("verifying webhook SA does NOT have apiexports/content on network.test.io in network-provider")
+		By("verifying webhook SA also has apiexports/content on network.test.io (shard-wide)")
 		allowed, err := webhookSACanAccessExport(wsNetworkProvider, "network.test.io")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(allowed).To(BeFalse(),
-			"webhook SA should NOT have apiexports/content on network.test.io (dependency target, not dependent)")
-
-		By("verifying webhook SA does NOT have apiexports/content on unrelated exports")
-		allowed, err = webhookSACanAccessExport(wsComputeProvider, "nonexistent-export")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(allowed).To(BeFalse(),
-			"webhook SA should NOT have apiexports/content on unrelated APIExports")
+		Expect(allowed).To(BeTrue(),
+			"webhook SA should have shard-wide apiexports/content access via system:admin")
 
 		By("verifying webhook SA cannot access secrets in compute-provider")
 		allowed, err = webhookSACanAccessResource(wsComputeProvider, "", "secrets", "list")
@@ -176,7 +169,7 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "skip-vm", "--namespace", "default") //nolint:errcheck
 	})
 
-	It("should remove webhook and RBAC after DependencyRule is deleted", func() {
+	It("should remove webhook after DependencyRule is deleted", func() {
 		By("creating VPC and VM for cleanup test")
 		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-cleanup-vpc.yaml"), nil)
 		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-cleanup-vm.yaml"), nil)
@@ -214,17 +207,8 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			return err
 		}()).To(Succeed())
 
-		By("verifying webhook SA loses apiexports/content access after rule deletion")
-		waitFor(30*time.Second, "webhook SA loses apiexports/content on compute.test.io", func() error {
-			allowed, err := webhookSACanAccessExport(wsComputeProvider, "compute.test.io")
-			if err != nil {
-				return fmt.Errorf("SAR check: %w", err)
-			}
-			if allowed {
-				return fmt.Errorf("webhook SA still has apiexports/content on compute.test.io after rule deletion")
-			}
-			return nil
-		})
+		// RBAC is not affected by rule deletion — webhook SA retains shard-wide
+		// apiexports/content access via system:admin bootstrap RBAC.
 
 		// Clean up remaining resources.
 		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "cleanup-vm", "--namespace", "default") //nolint:errcheck
@@ -242,18 +226,6 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		waitFor(time.Minute, "webhook reinstalled in network-provider", func() error {
 			_, err := kcpctlNoFail(wsNetworkProvider, "get", "validatingwebhookconfiguration", "dependency-controller")
 			return err
-		})
-
-		By("verifying webhook SA regains apiexports/content access")
-		waitFor(time.Minute, "webhook SA has apiexports/content on compute.test.io after recreation", func() error {
-			allowed, err := webhookSACanAccessExport(wsComputeProvider, "compute.test.io")
-			if err != nil {
-				return fmt.Errorf("SAR check: %w", err)
-			}
-			if !allowed {
-				return fmt.Errorf("webhook SA does not yet have apiexports/content on compute.test.io")
-			}
-			return nil
 		})
 
 		By("waiting for webhook to block recreate-vpc deletion")

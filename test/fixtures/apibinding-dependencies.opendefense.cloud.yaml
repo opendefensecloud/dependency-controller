@@ -14,15 +14,3 @@ spec:
       selector:
         matchAll: true
       state: Accepted
-    - group: "rbac.authorization.k8s.io"
-      resource: "clusterroles"
-      verbs: ["get", "list", "watch", "create", "update", "delete"]
-      selector:
-        matchAll: true
-      state: Accepted
-    - group: "rbac.authorization.k8s.io"
-      resource: "clusterrolebindings"
-      verbs: ["get", "list", "watch", "create", "update", "delete"]
-      selector:
-        matchAll: true
-      state: Accepted

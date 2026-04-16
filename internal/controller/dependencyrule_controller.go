@@ -24,9 +24,9 @@ import (
 )
 
 // DependencyRuleReconciler watches DependencyRule objects across provider workspaces
-// via the dep-ctrl's own APIExport. It handles webhook installation and RBAC
-// management. Per-rule indexed caches are managed by the webhook server's
-// RuleCacheManager instead.
+// via the dep-ctrl's own APIExport. It handles webhook installation in
+// dependency provider workspaces. Per-rule indexed caches are managed by the
+// webhook server's RuleCacheManager instead.
 type DependencyRuleReconciler struct {
 	// DepCtrlManager is the multicluster manager for the dep-ctrl's APIExport.
 	DepCtrlManager mcmanager.Manager
@@ -34,9 +34,6 @@ type DependencyRuleReconciler struct {
 	// WebhookInstaller installs ValidatingWebhookConfigurations in provider
 	// workspaces. Nil if webhook installation is not configured.
 	WebhookInstaller *WebhookInstaller
-
-	// RBACManager manages RBAC in provider workspaces. Nil if not configured.
-	RBACManager *RBACManager
 
 	// APIExportName is the name of the dep-ctrl APIExport, used to discover
 	// the virtual workspace URL from the APIExportEndpointSlice.
@@ -60,7 +57,7 @@ func NewDependencyRuleReconciler(depCtrlMgr mcmanager.Manager) *DependencyRuleRe
 }
 
 // ensureInitialized lazily discovers the VW base URL and creates a workspace
-// resolver. Must be called before using WebhookInstaller or RBACManager.
+// resolver. Must be called before using WebhookInstaller.
 func (r *DependencyRuleReconciler) ensureInitialized(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -95,13 +92,13 @@ func (r *DependencyRuleReconciler) ensureInitialized(ctx context.Context) error 
 	rootCfg.Host += logicalcluster.NewPath("root").RequestPath()
 	r.wsResolver = &workspaceResolver{rootCfg: rootCfg, scheme: localMgr.GetScheme()}
 
-	log.FromContext(ctx).Info("discovered VW base URL for webhook/RBAC operations", "url", vwURL)
+	log.FromContext(ctx).Info("discovered VW base URL for webhook operations", "url", vwURL)
 
 	return nil
 }
 
-// Reconcile handles DependencyRule events: installs/removes webhooks and
-// reconciles RBAC in provider workspaces.
+// Reconcile handles DependencyRule events: installs/removes webhooks in
+// dependency provider workspaces.
 func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("rule", req.Name, "cluster", req.ClusterName)
 
@@ -142,13 +139,6 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 		}
 	}
 
-	if r.RBACManager != nil {
-		if err := r.ensureRBAC(ctx, ruleKey, &rule); err != nil {
-			logger.Error(err, "failed to reconcile RBAC")
-			return ctrl.Result{}, err
-		}
-	}
-
 	return ctrl.Result{}, nil
 }
 
@@ -169,58 +159,26 @@ func (r *DependencyRuleReconciler) ensureWebhooks(ctx context.Context, ruleKey s
 	return r.WebhookInstaller.EnsureWebhooks(ctx, ruleKey, resolvedRule)
 }
 
-// ensureRBAC manages RBAC for the webhook in dependent provider workspaces via the VW.
-func (r *DependencyRuleReconciler) ensureRBAC(ctx context.Context, ruleKey string, rule *v1alpha1.DependencyRule) error {
-	wsPath := rule.Spec.Dependent.APIExportRef.Path
-	clusterName, err := r.wsResolver.resolve(wsPath)
-	if err != nil {
-		return fmt.Errorf("resolving %s: %w", wsPath, err)
-	}
-
-	ref := ExportRef{
-		WorkspacePath: clusterName, // logical cluster name, used as VW path
-		ExportName:    rule.Spec.Dependent.APIExportRef.Name,
-	}
-	r.RBACManager.BaseConfig = r.vwBaseCfg
-	r.RBACManager.TrackRule(ruleKey, ref)
-	return r.RBACManager.Reconcile(ctx)
-}
-
-// collectWorkspacePaths extracts all workspace paths referenced in a DependencyRule.
+// collectWorkspacePaths extracts dependency workspace paths referenced in a DependencyRule.
 func (r *DependencyRuleReconciler) collectWorkspacePaths(rule *v1alpha1.DependencyRule) []string {
 	seen := make(map[string]struct{})
 	var paths []string
 
-	add := func(path string) {
-		if _, ok := seen[path]; !ok {
-			seen[path] = struct{}{}
-			paths = append(paths, path)
-		}
-	}
-
-	add(rule.Spec.Dependent.APIExportRef.Path)
 	for _, dep := range rule.Spec.Dependencies {
-		add(dep.APIExportRef.Path)
+		if _, ok := seen[dep.APIExportRef.Path]; !ok {
+			seen[dep.APIExportRef.Path] = struct{}{}
+			paths = append(paths, dep.APIExportRef.Path)
+		}
 	}
 
 	return paths
 }
 
-// handleDeletion cleans up webhooks and RBAC for a deleted DependencyRule.
+// handleDeletion cleans up webhooks for a deleted DependencyRule.
 func (r *DependencyRuleReconciler) handleDeletion(ctx context.Context, key, ruleName string) error {
-	logger := log.FromContext(ctx).WithValues("rule", ruleName)
-
 	if r.WebhookInstaller != nil {
 		if err := r.WebhookInstaller.RemoveWebhooks(ctx, key); err != nil {
 			return fmt.Errorf("removing webhooks for rule %s: %w", ruleName, err)
-		}
-	}
-
-	if r.RBACManager != nil {
-		affectedWS := r.RBACManager.RemoveRule(key)
-		if err := r.RBACManager.Reconcile(ctx, affectedWS); err != nil {
-			logger.Error(err, "failed to reconcile RBAC after rule deletion")
-			// Non-fatal: the role may have stale entries but won't break anything.
 		}
 	}
 

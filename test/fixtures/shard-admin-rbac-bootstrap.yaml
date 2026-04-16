@@ -1,0 +1,33 @@
+# RBAC in kcp's system:admin logical cluster, granting the webhook SA
+# apiexports/content and apiexportendpointslices read access across all
+# workspaces on the shard. Applied via the kcp server (not front-proxy)
+# using a bootstrap (system:masters) identity.
+#
+# system:admin RBAC is evaluated by the Bootstrap Policy Authorizer for
+# every request on the shard, so this single grant replaces the per-workspace
+# ClusterRole/ClusterRoleBinding that the controller previously managed.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dependency-controller-webhook-apiexport-reader
+rules:
+  - apiGroups: ["apis.kcp.io"]
+    resources: ["apiexports/content"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apis.kcp.io"]
+    resources: ["apiexportendpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dependency-controller-webhook-apiexport-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dependency-controller-webhook-apiexport-reader
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "system:serviceaccount:dependency-system:dependency-webhook"

@@ -541,6 +541,12 @@ func bootstrapRBAC() {
 	run(kubectlBin, "--kubeconfig", bsKubeconfig,
 		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpServerLocalPort, wsDepCtrl),
 		"apply", "-f", filepath.Join(fixturesDir, "depctrl-rbac-bootstrap.yaml"))
+
+	// Apply shard-wide RBAC in system:admin (apiexports/content + apiexportendpointslices for webhook SA).
+	// The Bootstrap Policy Authorizer evaluates system:admin RBAC for every request on the shard.
+	run(kubectlBin, "--kubeconfig", bsKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/system:admin", kcpServerLocalPort),
+		"apply", "-f", filepath.Join(fixturesDir, "shard-admin-rbac-bootstrap.yaml"))
 }
 
 func buildAndLoadImage() {

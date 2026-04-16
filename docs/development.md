@@ -22,7 +22,6 @@ internal/
   controller/
     dependencyrule_controller.go   Reconciler + workspace resolver (VW routing)
     webhook_installer.go           Manages ValidatingWebhookConfigurations
-    rbac_manager.go                Manages ClusterRole/Binding via dep-ctrl VW
   fieldpath/
     fieldpath.go                   Dot-notation field path resolver
   webhook/
@@ -134,14 +133,13 @@ kubectl apply -k config/kcp/
 ```
 
 This creates the `APIResourceSchema` objects and the
-`dependencies.opendefense.cloud` APIExport. The APIExport includes
-`permissionClaims` for `validatingwebhookconfigurations`, `clusterroles`, and
-`clusterrolebindings` -- these authorize the controller to manage webhooks and
-RBAC in provider workspaces through the virtual workspace.
+`dependencies.opendefense.cloud` APIExport. The APIExport includes a
+`permissionClaim` for `validatingwebhookconfigurations` -- this authorizes the
+controller to manage webhooks in provider workspaces through the virtual workspace.
 
 ### 2. Apply bootstrap RBAC
 
-Bootstrap RBAC is required in two workspaces, applied with a privileged identity:
+Bootstrap RBAC is required in three locations, applied with a privileged identity:
 
 **Root workspace** -- both components need `workspaces/content` access to enter
 child workspaces. The controller also needs `workspaces` read access for
@@ -153,13 +151,22 @@ kubectl apply -f test/fixtures/root-rbac-bootstrap.yaml
 ```
 
 **Dep-ctrl workspace** -- the controller needs full CRUD on `apiexports/content`
-(to manage claimed resources through the VW). The webhook needs read-only access
-(to watch DependencyRules). Both need `apiexportendpointslices` read access for
-VW URL discovery:
+(to manage claimed resources through the VW) and `apiexportendpointslices` read
+access for VW URL discovery:
 
 ```sh
 kubectl ws root:dep-ctrl
 kubectl apply -f test/fixtures/depctrl-rbac-bootstrap.yaml
+```
+
+**system:admin** (shard-local) -- the webhook SA gets shard-wide read access to
+`apiexports/content` and `apiexportendpointslices`, evaluated by the Bootstrap
+Policy Authorizer for every request on the shard. Must be applied via the kcp
+server (not front-proxy):
+
+```sh
+kubectl --server=https://<kcp-server>:6443/clusters/system:admin \
+  apply -f test/fixtures/shard-admin-rbac-bootstrap.yaml
 ```
 
 Adjust the service account names in the `ClusterRoleBinding` subjects to match
@@ -189,7 +196,7 @@ workspace paths to logical cluster names via root Workspace objects.
 Each API provider that wants deletion protection:
 
 1. Binds to the dep-ctrl APIExport in their provider workspace, **accepting the
-   permissionClaims** (required for the controller to manage webhooks and RBAC):
+   permissionClaim** (required for the controller to install webhooks):
    ```yaml
    spec:
      permissionClaims:
@@ -197,20 +204,11 @@ Each API provider that wants deletion protection:
          resource: "validatingwebhookconfigurations"
          selector: { matchAll: true }
          state: Accepted
-       - group: "rbac.authorization.k8s.io"
-         resource: "clusterroles"
-         selector: { matchAll: true }
-         state: Accepted
-       - group: "rbac.authorization.k8s.io"
-         resource: "clusterrolebindings"
-         selector: { matchAll: true }
-         state: Accepted
    ```
 2. Creates a `DependencyRule` declaring which of their resources depend on which
    other resources
 
 The controller then automatically installs a `ValidatingWebhookConfiguration`
-in each dependency provider's workspace (via the VW) and creates
-`apiexports/content` RBAC in the dependent's provider workspace. The webhook
-server picks up the rule, starts an indexed cache for the dependent resource
-type, and begins serving admission requests.
+in each dependency provider's workspace (via the VW). The webhook server picks
+up the rule, starts an indexed cache for the dependent resource type (authorized
+by the shard-wide system:admin RBAC), and begins serving admission requests.

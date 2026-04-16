@@ -15,8 +15,8 @@ leaves the VM in a broken state.
 
 The system solves this with two cooperating binaries:
 
-- **Controller** -- watches `DependencyRule` objects, installs admission webhooks
-  in provider workspaces, and manages RBAC
+- **Controller** -- watches `DependencyRule` objects and installs admission webhooks
+  in provider workspaces
 - **Webhook** -- maintains indexed caches of dependent resources and serves
   admission requests that block deletion of still-referenced resources
 
@@ -32,7 +32,6 @@ graph LR
         CPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
         CPExport["APIExport: compute"]
         CPRule["DependencyRule:<br/>VM → VPC"]
-        CPRBAC["ClusterRole:<br/>apiexports/content"]
     end
 
     subgraph NP["Network Provider WS"]
@@ -63,18 +62,17 @@ graph LR
 ```
 
 **Dep-ctrl workspace** -- hosts the `DependencyRule` APIExport
-(`dependencies.opendefense.cloud`) with `permissionClaims` for
-`validatingwebhookconfigurations`, `clusterroles`, and `clusterrolebindings`.
-Both the controller and webhook connect to this workspace's virtual workspace
-to discover rules. The controller also uses the virtual workspace to manage
-webhooks and RBAC in binding workspaces (authorized by the permissionClaims).
+(`dependencies.opendefense.cloud`) with a `permissionClaim` for
+`validatingwebhookconfigurations`. Both the controller and webhook connect to
+this workspace's virtual workspace to discover rules. The controller also uses
+the virtual workspace to manage webhooks in binding workspaces (authorized by
+the permissionClaim).
 
 **Provider workspaces** -- each provider (compute, network, ...) exports its own
 resource types and binds to the dep-ctrl APIExport to create `DependencyRule`
-objects. The APIBinding must **accept** the dep-ctrl's permissionClaims, which
-grants the controller access to manage `ValidatingWebhookConfigurations`,
-`ClusterRoles`, and `ClusterRoleBindings` in those workspaces through the
-virtual workspace.
+objects. The APIBinding must **accept** the dep-ctrl's permissionClaim, which
+grants the controller access to manage `ValidatingWebhookConfigurations` in
+those workspaces through the virtual workspace.
 
 **Consumer workspaces** -- bind to provider exports and create the actual
 resources (VPCs, VMs). Consumers don't interact with the dependency system directly.
@@ -91,7 +89,6 @@ flowchart TD
     subgraph Controller["Controller Binary (cmd/controller)"]
         DR["DependencyRule Reconciler<br/><i>+ Workspace Resolver</i>"]
         DR -->|delegates to| WI["Webhook Installer"]
-        DR -->|updates| RBAC["RBAC Manager<br/><i>apiexports/content per provider WS</i>"]
     end
 
     subgraph Webhook["Webhook Server Binary (cmd/webhook)"]
@@ -103,7 +100,6 @@ flowchart TD
     end
 
     WI -->|"installs via dep-ctrl VW"| PW["Provider Workspaces"]
-    RBAC -->|"creates via dep-ctrl VW"| PW
     PW -->|"dispatches DELETE to"| DV
 
     style Controller fill:#dbeafe,color:#1e3a5f
@@ -117,9 +113,10 @@ flowchart TD
 
 **Entry point:** [`cmd/controller/main.go`](../cmd/controller/main.go)
 
-The controller watches `DependencyRule` objects and ensures the infrastructure is
-in place for the webhook to do its job: admission webhooks exist in the right
-provider workspaces, and RBAC grants the webhook read access to dependent resources.
+The controller watches `DependencyRule` objects and ensures admission webhooks
+exist in the right provider workspaces. The webhook's read access to dependent
+resources is granted shard-wide via `system:admin` bootstrap RBAC, so the
+controller only handles webhook installation.
 
 All operations in provider workspaces are routed through the dep-ctrl APIExport's
 virtual workspace, authorized by `permissionClaims`. The controller never connects
@@ -176,37 +173,6 @@ When a DependencyRule is deleted
 ([`handleDeletion`](../internal/controller/dependencyrule_controller.go)),
 the installer removes that rule's contributions. If no rules remain for a
 workspace, the webhook is deleted entirely.
-
-#### 2. RBAC Management
-
-The [`RBACManager`](../internal/controller/rbac_manager.go) dynamically manages
-`ClusterRole` and `ClusterRoleBinding` objects in provider workspaces, granting
-the webhook server access to APIExport virtual workspaces for dependent resource
-types.
-
-In kcp, access to an APIExport's virtual workspace is controlled by the
-`apiexports/content` subresource in the workspace where the APIExport is defined.
-The webhook needs this access to watch dependent resources across consumer
-workspaces.
-
-Like webhook installation, RBAC operations are routed through the dep-ctrl VW
-using resolved logical cluster names. The `permissionClaims` authorize creating
-`ClusterRoles` and `ClusterRoleBindings` in binding workspaces.
-
-Each reconcile calls `TrackRule(key, ref)` with the rule's
-[`ExportRef`](../internal/controller/rbac_manager.go) (workspace path + APIExport
-name), then `Reconcile(ctx)` which:
-
-1. Groups tracked rules by workspace path
-2. For each workspace, builds a `ClusterRole` granting `get`/`list`/`watch` on
-   `apiexports/content` scoped to specific APIExport names, plus
-   `apiexportendpointslices` for VW URL discovery
-3. Creates or updates the `ClusterRole` and ensures a `ClusterRoleBinding` exists
-
-On rule deletion, `RemoveRule(key)` returns the affected workspace path. The
-reconciler then passes it as an extra workspace to `Reconcile(ctx, wsPath)` to
-ensure cleanup. If no rules remain for a workspace, the `ClusterRole` and
-`ClusterRoleBinding` are deleted.
 
 ---
 

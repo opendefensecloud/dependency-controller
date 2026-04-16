@@ -63,12 +63,16 @@ Management Cluster (kind)            kcp
 +-------------------------------+    +----------------------------------+
 | dependency-controller pod     |    | root workspace                   |
 |   reads Workspace objects     |--->|   ClusterRoles for both SAs      |
-|   manages webhooks+RBAC via VW|    |                                  |
+|   manages webhooks via VW     |    |                                  |
 |                               |    | root:dep-ctrl workspace          |
 | dependency-webhook pod        |    |   APIExport: DependencyRule      |
-|   watches rules via VW        |--->|   ClusterRoles for both SAs      |
+|   watches rules via VW        |--->|   ClusterRoles for controller SA |
 |   serves admission requests   |    |                                  |
-+-------------------------------+    | root:network-provider            |
++-------------------------------+    | system:admin (shard-local)       |
+                                     |   ClusterRole for webhook SA     |
+                                     |   (shard-wide apiexports/content)|
+                                     |                                  |
+                                     | root:network-provider            |
                                      |   APIExport: VPCs                |
                                      |   ValidatingWebhook (installed   |
                                      |     by controller via VW)        |
@@ -76,8 +80,6 @@ Management Cluster (kind)            kcp
                                      | root:compute-provider            |
                                      |   APIExport: VMs                 |
                                      |   DependencyRule: VM -> VPC      |
-                                     |   ClusterRole (installed by      |
-                                     |     controller for webhook)      |
                                      +----------------------------------+
 ```
 
@@ -99,7 +101,7 @@ kubectl apply -f config/kcp/apiexport-dependencies.opendefense.cloud.yaml
 
 The APIExport
 ([`config/kcp/apiexport-dependencies.opendefense.cloud.yaml`](../config/kcp/apiexport-dependencies.opendefense.cloud.yaml))
-declares `permissionClaims` for three resource types:
+declares a `permissionClaim` for webhook configurations:
 
 ```yaml
 spec:
@@ -107,17 +109,11 @@ spec:
     - group: "admissionregistration.k8s.io"
       resource: "validatingwebhookconfigurations"
       verbs: ["get", "list", "watch", "create", "update", "delete"]
-    - group: "rbac.authorization.k8s.io"
-      resource: "clusterroles"
-      verbs: ["get", "list", "watch", "create", "update", "delete"]
-    - group: "rbac.authorization.k8s.io"
-      resource: "clusterrolebindings"
-      verbs: ["get", "list", "watch", "create", "update", "delete"]
 ```
 
-**Why?** The controller needs to manage resources in provider workspaces that
-bind to this APIExport. In kcp, you can't directly access another workspace's
-resources -- instead, the APIExport's
+**Why?** The controller needs to install `ValidatingWebhookConfigurations` in
+provider workspaces that bind to this APIExport. In kcp, you can't directly
+access another workspace's resources -- instead, the APIExport's
 [virtual workspace](https://docs.kcp.io/kcp/main/concepts/apis/virtual-workspaces/)
 acts as a proxy. `permissionClaims` tell kcp which resource types the APIExport
 provider is allowed to manage in binding workspaces via that proxy. Provider
@@ -127,7 +123,7 @@ workspaces must explicitly accept these claims when creating their APIBinding
 ## Step 2: Bootstrap RBAC in kcp
 
 Both components run with dedicated service account identities. They need
-specific permissions in two kcp workspaces, applied once using a privileged
+specific permissions in several kcp locations, applied once using a privileged
 identity (e.g., `system:masters` via a bootstrap certificate).
 
 ### Root workspace RBAC
@@ -165,7 +161,7 @@ to map paths to cluster names via `workspace.spec.cluster`.
 
 ### Dep-ctrl workspace RBAC
 
-Both components need access to the dep-ctrl APIExport's virtual workspace.
+The controller needs access to the dep-ctrl APIExport's virtual workspace.
 This is authorized by the `apiexports/content` subresource in the workspace
 where the APIExport is defined.
 
@@ -182,21 +178,52 @@ creates:
 |---|---|---|
 | ClusterRole | `dependency-controller` | `apiexportendpointslices` read + `apiexports/content` full CRUD |
 | ClusterRoleBinding | `dependency-controller` | Binds to controller SA |
-| ClusterRole | `dependency-controller-webhook` | `apiexportendpointslices` read + `apiexports/content` read-only |
-| ClusterRoleBinding | `dependency-controller-webhook` | Binds to webhook SA |
 
-**Why `apiexportendpointslices`?** Both components discover the virtual
+**Why `apiexportendpointslices`?** The controller discovers the virtual
 workspace URL by reading the `APIExportEndpointSlice` for the
 `dependencies.opendefense.cloud` APIExport. This URL is the entry point for
 all operations through the virtual workspace.
 
-**Why `apiexports/content` with different permission levels?**
-- The **controller** needs full CRUD because it writes resources (webhooks, RBAC)
-  in binding workspaces through the virtual workspace. The verb on
-  `apiexports/content` controls what operations are allowed through the VW --
-  read-only access would block the controller from creating anything.
-- The **webhook** only needs read access -- it watches `DependencyRule` objects
-  through the VW but never writes.
+**Why `apiexports/content` with full CRUD?** The controller writes resources
+(webhooks) in binding workspaces through the virtual workspace. The verb on
+`apiexports/content` controls what operations are allowed through the VW --
+read-only access would block the controller from creating anything.
+
+### Shard-wide RBAC via system:admin
+
+The webhook needs read access to `apiexports/content` and
+`apiexportendpointslices` across **all** workspaces on the shard. Rather than
+creating per-workspace RBAC, this is granted once in kcp's `system:admin`
+logical cluster. The Bootstrap Policy Authorizer evaluates `system:admin` RBAC
+for every request on the shard.
+
+This must be applied via the **kcp server** (not the front-proxy), using a
+`system:masters` identity:
+
+```sh
+kubectl --server=https://<kcp-server>:6443/clusters/system:admin \
+  apply -f test/fixtures/shard-admin-rbac-bootstrap.yaml
+```
+
+The file
+([`test/fixtures/shard-admin-rbac-bootstrap.yaml`](../test/fixtures/shard-admin-rbac-bootstrap.yaml))
+creates:
+
+| Resource | Name | Permissions |
+|---|---|---|
+| ClusterRole | `dependency-controller-webhook-apiexport-reader` | `apiexports/content` + `apiexportendpointslices` read |
+| ClusterRoleBinding | `dependency-controller-webhook-apiexport-reader` | Binds to webhook SA |
+
+**Why shard-wide?** The webhook watches DependencyRules via the dep-ctrl
+APIExport VW, and reads dependent resources (e.g., VirtualMachines) via other
+providers' APIExport VWs. These VWs span many workspaces. Granting read access
+at the shard level avoids the need for per-workspace RBAC management and
+removes the need for `clusterroles`/`clusterrolebindings` permissionClaims on
+the APIExport.
+
+**Why `system:admin`?** This is a shard-local logical cluster (not a workspace)
+where the Bootstrap Policy Authorizer evaluates RBAC for every request on the
+shard. It is accessed via the kcp server directly, not the front-proxy.
 
 ### Adjusting service account names
 
@@ -309,8 +336,8 @@ sides of the dependency relationship:
   the controller needs to install a `ValidatingWebhookConfiguration` there to
   intercept VPC deletions
 - The **dependent provider** (compute-provider, which exports VMs) -- the
-  controller needs to create RBAC there granting the webhook read access to
-  VirtualMachines via the compute APIExport's virtual workspace
+  controller needs to reach this workspace via the VW to discover the
+  DependencyRule
 
 The controller reaches both workspaces through the dep-ctrl APIExport's virtual
 workspace. In kcp, a virtual workspace can only access workspaces that bind to
@@ -340,21 +367,9 @@ spec:
       selector:
         matchAll: true
       state: Accepted
-    - group: "rbac.authorization.k8s.io"
-      resource: "clusterroles"
-      verbs: ["get", "list", "watch", "create", "update", "delete"]
-      selector:
-        matchAll: true
-      state: Accepted
-    - group: "rbac.authorization.k8s.io"
-      resource: "clusterrolebindings"
-      verbs: ["get", "list", "watch", "create", "update", "delete"]
-      selector:
-        matchAll: true
-      state: Accepted
 EOF
 
-# In compute-provider (where the RBAC will be created)
+# In compute-provider (where the DependencyRule is created)
 kubectl ws root:compute-provider
 kubectl apply -f - <<'EOF'
 apiVersion: apis.kcp.io/v1alpha2
@@ -373,18 +388,6 @@ spec:
       selector:
         matchAll: true
       state: Accepted
-    - group: "rbac.authorization.k8s.io"
-      resource: "clusterroles"
-      verbs: ["get", "list", "watch", "create", "update", "delete"]
-      selector:
-        matchAll: true
-      state: Accepted
-    - group: "rbac.authorization.k8s.io"
-      resource: "clusterrolebindings"
-      verbs: ["get", "list", "watch", "create", "update", "delete"]
-      selector:
-        matchAll: true
-      state: Accepted
 EOF
 ```
 
@@ -392,11 +395,10 @@ A reference fixture is available at
 [`test/fixtures/apibinding-dependencies.opendefense.cloud.yaml`](../test/fixtures/apibinding-dependencies.opendefense.cloud.yaml)
 (replace `${DEP_CTRL_PATH}` with `root:dep-ctrl`).
 
-The accepted permissionClaims grant the controller permission to:
-- Create `ValidatingWebhookConfigurations` in the workspace (for deletion
-  protection)
-- Create `ClusterRoles` and `ClusterRoleBindings` in the workspace (to grant
-  the webhook read access to the provider's APIExport virtual workspace)
+The accepted permissionClaim grants the controller permission to create
+`ValidatingWebhookConfigurations` in the workspace (for deletion protection).
+The webhook's read access to provider APIExports is handled shard-wide via the
+`system:admin` bootstrap RBAC (Step 2) -- no per-workspace RBAC is needed.
 
 ### 5c. Create a DependencyRule
 
@@ -433,14 +435,12 @@ EOF
 A reference fixture is available at
 [`test/fixtures/dependencyrule-vm-dependencies.yaml`](../test/fixtures/dependencyrule-vm-dependencies.yaml).
 
-Once applied, the controller will:
-1. Install a `ValidatingWebhookConfiguration` in `root:network-provider`
-   (protecting VPC deletions)
-2. Create RBAC in `root:compute-provider` (granting the webhook read access to
-   VirtualMachines via the compute APIExport's virtual workspace)
+Once applied, the controller will install a `ValidatingWebhookConfiguration`
+in `root:network-provider` (protecting VPC deletions).
 
 The webhook will:
 1. Start an indexed cache watching VirtualMachines via the compute APIExport VW
+   (authorized by the shard-wide `system:admin` RBAC from Step 2)
 2. Begin serving admission requests for VPC deletions
 
 ### 5d. Create a consumer workspace and test resources
@@ -526,14 +526,12 @@ Here's the flow that makes Step 5e work:
    `<vw-url>/clusters/<logical-cluster-name>` and creates a
    `ValidatingWebhookConfiguration` in the network-provider workspace
    (authorized by the accepted `validatingwebhookconfigurations` permissionClaim)
-4. It also creates a `ClusterRole` + `ClusterRoleBinding` in compute-provider
-   (via the VW) granting the webhook `apiexports/content` on `compute.test.io`
-5. The **webhook** also watches the same DependencyRule and starts an indexed
+4. The **webhook** also watches the same DependencyRule and starts an indexed
    cache watching VirtualMachines via compute.test.io's VW (authorized by the
-   RBAC from step 4)
-6. When a consumer deletes a VPC, kcp dispatches the DELETE to the webhook
+   shard-wide `system:admin` RBAC from Step 2)
+5. When a consumer deletes a VPC, kcp dispatches the DELETE to the webhook
    (via the installed `ValidatingWebhookConfiguration`)
-7. The webhook queries its indexed cache: "any VMs where `.spec.vpcRef.name`
+6. The webhook queries its indexed cache: "any VMs where `.spec.vpcRef.name`
    equals `my-vpc`?" -- finds `my-vm` and denies the deletion
 
 ## Troubleshooting
@@ -549,8 +547,8 @@ kubectl -n dependency-system logs -l app.kubernetes.io/component=webhook
 
 Common issues:
 - **Kubeconfig invalid** -- the webhook can't reach kcp
-- **Missing dep-ctrl RBAC** -- the webhook SA needs `apiexports/content` read
-  access in the dep-ctrl workspace (Step 2)
+- **Missing system:admin RBAC** -- the webhook SA needs shard-wide
+  `apiexports/content` and `apiexportendpointslices` read access (Step 2)
 - **Missing root RBAC** -- the webhook SA needs `workspaces/content` in root
   (Step 2)
 
@@ -563,18 +561,13 @@ Check that all pieces are in place:
 kubectl ws root:network-provider
 kubectl get validatingwebhookconfiguration dependency-controller
 
-# Is the RBAC in place for the webhook?
-kubectl ws root:compute-provider
-kubectl get clusterrole dependency-controller-webhook
-kubectl get clusterrolebinding dependency-controller-webhook
-
 # Are the DependencyRule bindings bound?
 kubectl ws root:compute-provider
 kubectl get apibinding dependencies.opendefense.cloud -o jsonpath='{.status.phase}'
 # Should be: Bound
 ```
 
-### Controller can't create webhooks or RBAC
+### Controller can't create webhooks
 
 Check that the provider workspace's APIBinding has accepted the
 permissionClaims (Step 5b). Without acceptance, the VW rejects write

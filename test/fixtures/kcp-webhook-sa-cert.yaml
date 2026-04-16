@@ -1,8 +1,8 @@
 # Client certificate for the dependency-webhook service account.
 # Issued by kcp's client CA so the webhook can connect to the kcp server
 # directly. The CN and orgs encode the SA identity that kcp uses for
-# authorization (matching the bootstrap RBAC subject and the controller's
-# dynamic RBAC bindings).
+# authorization (matching the bootstrap RBAC subjects in root, dep-ctrl,
+# and system:admin).
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
