@@ -4,213 +4,154 @@
 package controller
 
 import (
-	"context"
 	"sort"
 	"testing"
-
-	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/scheme"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func newTestRBACManager() *RBACManager {
-	return &RBACManager{
-		Client:                  fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
-		ServiceAccountName:      "dep-ctrl",
-		ServiceAccountNamespace: "dep-ctrl-system",
-	}
-}
-
 func TestRBACManager_TrackAndRemove(t *testing.T) {
-	mgr := newTestRBACManager()
-	vpcGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"}
+	mgr := &RBACManager{}
+	ref := ExportRef{WorkspacePath: "root:compute-provider", ExportName: "compute.test.io"}
 
-	mgr.TrackRule("c1/rule1", vpcGVR)
-	rules := mgr.buildPolicyRules()
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule, got %d", len(rules))
+	mgr.TrackRule("c1/rule1", ref)
+
+	state := mgr.desiredStateByWorkspace()
+	if len(state) != 1 {
+		t.Fatalf("expected 1 workspace, got %d", len(state))
 	}
-	if rules[0].APIGroups[0] != "net.io" {
-		t.Errorf("group = %q, want %q", rules[0].APIGroups[0], "net.io")
+	exports := state["root:compute-provider"]
+	if _, ok := exports["compute.test.io"]; !ok {
+		t.Error("expected compute.test.io in workspace exports")
 	}
 
 	mgr.RemoveRule("c1/rule1")
-	if len(mgr.buildPolicyRules()) != 0 {
-		t.Error("expected 0 rules after remove")
+	state = mgr.desiredStateByWorkspace()
+	if len(state) != 0 {
+		t.Error("expected 0 workspaces after remove")
 	}
 }
 
-func TestRBACManager_DeduplicatesSameGroup(t *testing.T) {
-	mgr := newTestRBACManager()
+func TestRBACManager_DeduplicatesSameExport(t *testing.T) {
+	mgr := &RBACManager{}
 
-	mgr.TrackRule("c1/rule1", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"})
-	mgr.TrackRule("c1/rule2", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"})
-	mgr.TrackRule("c1/rule3", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "subnets"})
+	// Two rules referencing the same APIExport.
+	mgr.TrackRule("c1/rule1", ExportRef{WorkspacePath: "root:compute", ExportName: "compute.io"})
+	mgr.TrackRule("c1/rule2", ExportRef{WorkspacePath: "root:compute", ExportName: "compute.io"})
 
-	rules := mgr.buildPolicyRules()
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 policy rule (grouped by API group), got %d", len(rules))
+	state := mgr.desiredStateByWorkspace()
+	if len(state) != 1 {
+		t.Fatalf("expected 1 workspace, got %d", len(state))
 	}
-
-	resources := rules[0].Resources
-	sort.Strings(resources)
-	if len(resources) != 2 || resources[0] != "subnets" || resources[1] != "vpcs" {
-		t.Errorf("resources = %v, want [subnets vpcs]", resources)
+	if len(state["root:compute"]) != 1 {
+		t.Errorf("expected 1 export, got %d", len(state["root:compute"]))
 	}
 }
 
-func TestRBACManager_GroupsByAPIGroup(t *testing.T) {
-	mgr := newTestRBACManager()
+func TestRBACManager_GroupsByWorkspace(t *testing.T) {
+	mgr := &RBACManager{}
 
-	mgr.TrackRule("c1/rule1", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"})
-	mgr.TrackRule("c1/rule2", schema.GroupVersionResource{Group: "compute.io", Version: "v1", Resource: "vms"})
+	mgr.TrackRule("c1/rule1", ExportRef{WorkspacePath: "root:compute", ExportName: "compute.io"})
+	mgr.TrackRule("c1/rule2", ExportRef{WorkspacePath: "root:network", ExportName: "network.io"})
 
-	rules := mgr.buildPolicyRules()
-	if len(rules) != 2 {
-		t.Errorf("expected 2 policy rules (one per group), got %d", len(rules))
+	state := mgr.desiredStateByWorkspace()
+	if len(state) != 2 {
+		t.Errorf("expected 2 workspaces, got %d", len(state))
+	}
+}
+
+func TestRBACManager_MultipleExportsInSameWorkspace(t *testing.T) {
+	mgr := &RBACManager{}
+
+	mgr.TrackRule("c1/rule1", ExportRef{WorkspacePath: "root:provider", ExportName: "compute.io"})
+	mgr.TrackRule("c1/rule2", ExportRef{WorkspacePath: "root:provider", ExportName: "network.io"})
+
+	state := mgr.desiredStateByWorkspace()
+	if len(state) != 1 {
+		t.Fatalf("expected 1 workspace, got %d", len(state))
+	}
+	exports := state["root:provider"]
+	if len(exports) != 2 {
+		t.Errorf("expected 2 exports, got %d", len(exports))
 	}
 }
 
 func TestRBACManager_OverwritesSameKey(t *testing.T) {
-	mgr := newTestRBACManager()
+	mgr := &RBACManager{}
 
-	mgr.TrackRule("c1/rule1", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"})
-	mgr.TrackRule("c1/rule1", schema.GroupVersionResource{Group: "compute.io", Version: "v1", Resource: "vms"})
+	mgr.TrackRule("c1/rule1", ExportRef{WorkspacePath: "root:compute", ExportName: "compute.io"})
+	mgr.TrackRule("c1/rule1", ExportRef{WorkspacePath: "root:network", ExportName: "network.io"})
 
-	rules := mgr.buildPolicyRules()
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule after overwrite, got %d", len(rules))
+	state := mgr.desiredStateByWorkspace()
+	if len(state) != 1 {
+		t.Fatalf("expected 1 workspace after overwrite, got %d", len(state))
 	}
-	if rules[0].APIGroups[0] != "compute.io" {
-		t.Errorf("group = %q, want %q", rules[0].APIGroups[0], "compute.io")
+	if _, ok := state["root:network"]; !ok {
+		t.Error("expected root:network workspace after overwrite")
 	}
 }
 
 func TestRBACManager_RemoveNonexistent(t *testing.T) {
-	mgr := newTestRBACManager()
+	mgr := &RBACManager{}
 	mgr.RemoveRule("nonexistent") // should not panic
 }
 
 func TestRBACManager_BuildPolicyRulesEmpty(t *testing.T) {
 	mgr := &RBACManager{}
-	if len(mgr.buildPolicyRules()) != 0 {
-		t.Error("expected 0 rules for empty manager")
+	rules := mgr.buildPolicyRules(nil)
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules for empty exports, got %d", len(rules))
 	}
 }
 
-func TestRBACManager_ReconcileCreatesRoleAndBinding(t *testing.T) {
-	ctx := context.Background()
-	mgr := newTestRBACManager()
+func TestRBACManager_BuildPolicyRules(t *testing.T) {
+	mgr := &RBACManager{}
+	exports := map[string]struct{}{
+		"compute.io": {},
+		"network.io": {},
+	}
+	rules := mgr.buildPolicyRules(exports)
 
-	mgr.TrackRule("c1/rule1", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"})
-	if err := mgr.Reconcile(ctx); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	var cr rbacv1.ClusterRole
-	if err := mgr.Client.Get(ctx, types.NamespacedName{Name: rbacClusterRoleName}, &cr); err != nil {
-		t.Fatalf("getting ClusterRole: %v", err)
-	}
-	if len(cr.Rules) != 1 {
-		t.Fatalf("expected 1 policy rule, got %d", len(cr.Rules))
-	}
-	if cr.Rules[0].Verbs[0] != "get" {
-		t.Errorf("verbs = %v, want [get list watch]", cr.Rules[0].Verbs)
+	// Expect 2 rules: apiexports/content + apiexportendpointslices.
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
 	}
 
-	var crb rbacv1.ClusterRoleBinding
-	if err := mgr.Client.Get(ctx, types.NamespacedName{Name: rbacClusterRoleBindingName}, &crb); err != nil {
-		t.Fatalf("getting ClusterRoleBinding: %v", err)
+	// First rule: apiexports/content with resource names.
+	contentRule := rules[0]
+	if contentRule.APIGroups[0] != "apis.kcp.io" {
+		t.Errorf("group = %q, want apis.kcp.io", contentRule.APIGroups[0])
 	}
-	if crb.RoleRef.Name != rbacClusterRoleName {
-		t.Errorf("roleRef name = %q, want %q", crb.RoleRef.Name, rbacClusterRoleName)
+	if contentRule.Resources[0] != "apiexports/content" {
+		t.Errorf("resource = %q, want apiexports/content", contentRule.Resources[0])
 	}
-	if len(crb.Subjects) != 1 || crb.Subjects[0].Name != "dep-ctrl" {
-		t.Errorf("subjects = %v, want [{dep-ctrl dep-ctrl-system}]", crb.Subjects)
+	sort.Strings(contentRule.ResourceNames)
+	if len(contentRule.ResourceNames) != 2 || contentRule.ResourceNames[0] != "compute.io" || contentRule.ResourceNames[1] != "network.io" {
+		t.Errorf("resourceNames = %v, want [compute.io network.io]", contentRule.ResourceNames)
+	}
+
+	// Verify read-only verbs.
+	allowed := map[string]bool{"get": true, "list": true, "watch": true}
+	for _, verb := range contentRule.Verbs {
+		if !allowed[verb] {
+			t.Errorf("unexpected verb %q; only get/list/watch allowed", verb)
+		}
+	}
+
+	// Second rule: apiexportendpointslices.
+	essRule := rules[1]
+	if essRule.Resources[0] != "apiexportendpointslices" {
+		t.Errorf("resource = %q, want apiexportendpointslices", essRule.Resources[0])
 	}
 }
 
-func TestRBACManager_ReconcileUpdatesRole(t *testing.T) {
-	ctx := context.Background()
-	mgr := newTestRBACManager()
+func TestRBACManager_BuildPolicyRulesSingleExport(t *testing.T) {
+	mgr := &RBACManager{}
+	exports := map[string]struct{}{"compute.io": {}}
+	rules := mgr.buildPolicyRules(exports)
 
-	mgr.TrackRule("c1/rule1", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"})
-	if err := mgr.Reconcile(ctx); err != nil {
-		t.Fatalf("first Reconcile: %v", err)
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
 	}
-
-	mgr.TrackRule("c1/rule2", schema.GroupVersionResource{Group: "compute.io", Version: "v1", Resource: "vms"})
-	if err := mgr.Reconcile(ctx); err != nil {
-		t.Fatalf("second Reconcile: %v", err)
-	}
-
-	var cr rbacv1.ClusterRole
-	if err := mgr.Client.Get(ctx, types.NamespacedName{Name: rbacClusterRoleName}, &cr); err != nil {
-		t.Fatalf("getting ClusterRole: %v", err)
-	}
-	if len(cr.Rules) != 2 {
-		t.Errorf("expected 2 policy rules after update, got %d", len(cr.Rules))
-	}
-}
-
-func TestRBACManager_ReconcileRemovesRules(t *testing.T) {
-	ctx := context.Background()
-	mgr := newTestRBACManager()
-
-	mgr.TrackRule("c1/rule1", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"})
-	mgr.TrackRule("c1/rule2", schema.GroupVersionResource{Group: "compute.io", Version: "v1", Resource: "vms"})
-	if err := mgr.Reconcile(ctx); err != nil {
-		t.Fatalf("first Reconcile: %v", err)
-	}
-
-	mgr.RemoveRule("c1/rule1")
-	if err := mgr.Reconcile(ctx); err != nil {
-		t.Fatalf("second Reconcile: %v", err)
-	}
-
-	var cr rbacv1.ClusterRole
-	if err := mgr.Client.Get(ctx, types.NamespacedName{Name: rbacClusterRoleName}, &cr); err != nil {
-		t.Fatalf("getting ClusterRole: %v", err)
-	}
-	if len(cr.Rules) != 1 {
-		t.Errorf("expected 1 policy rule after removal, got %d", len(cr.Rules))
-	}
-	if cr.Rules[0].APIGroups[0] != "compute.io" {
-		t.Errorf("remaining group = %q, want %q", cr.Rules[0].APIGroups[0], "compute.io")
-	}
-}
-
-func TestRBACManager_ReconcileEmptyRules(t *testing.T) {
-	ctx := context.Background()
-	mgr := newTestRBACManager()
-
-	if err := mgr.Reconcile(ctx); err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-
-	var cr rbacv1.ClusterRole
-	if err := mgr.Client.Get(ctx, types.NamespacedName{Name: rbacClusterRoleName}, &cr); err != nil {
-		t.Fatalf("getting ClusterRole: %v", err)
-	}
-	if len(cr.Rules) != 0 {
-		t.Errorf("expected 0 rules, got %d", len(cr.Rules))
-	}
-}
-
-func TestRBACManager_ReconcileIdempotentBinding(t *testing.T) {
-	ctx := context.Background()
-	mgr := newTestRBACManager()
-
-	mgr.TrackRule("c1/rule1", schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"})
-	if err := mgr.Reconcile(ctx); err != nil {
-		t.Fatalf("first Reconcile: %v", err)
-	}
-
-	// Second reconcile should not error on existing binding.
-	mgr.TrackRule("c1/rule2", schema.GroupVersionResource{Group: "compute.io", Version: "v1", Resource: "vms"})
-	if err := mgr.Reconcile(ctx); err != nil {
-		t.Fatalf("second Reconcile: %v", err)
+	if len(rules[0].ResourceNames) != 1 || rules[0].ResourceNames[0] != "compute.io" {
+		t.Errorf("resourceNames = %v, want [compute.io]", rules[0].ResourceNames)
 	}
 }

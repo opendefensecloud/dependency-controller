@@ -7,7 +7,6 @@ import (
 	"flag"
 	"os"
 
-	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -18,7 +17,6 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -44,19 +42,15 @@ func init() {
 func main() {
 	var apiExportName string
 	var kcpBaseHost string
-	var rootShardHost string
-	var systemMasterPath string
-	var serviceAccountName string
-	var serviceAccountNamespace string
+	var webhookServiceAccountName string
+	var webhookServiceAccountNamespace string
 	var webhookURL string
 	var webhookCABundlePath string
 	var healthProbeBindAddress string
 	flag.StringVar(&apiExportName, "api-export-name", "dependencies.opendefense.cloud", "Name of the dependency-controller's APIExport")
 	flag.StringVar(&kcpBaseHost, "kcp-base-host", "", "Base kcp host URL (without workspace path). If empty, derived from kubeconfig.")
-	flag.StringVar(&rootShardHost, "root-shard-host", "", "Direct URL of the root shard (bypasses kcp front proxy). Required for RBAC management in system:master.")
-	flag.StringVar(&systemMasterPath, "system-master-path", "system:master", "Workspace path for system:master (for RBAC management)")
-	flag.StringVar(&serviceAccountName, "service-account-name", "dependency-controller", "Service account name for RBAC binding")
-	flag.StringVar(&serviceAccountNamespace, "service-account-namespace", "default", "Service account namespace for RBAC binding")
+	flag.StringVar(&webhookServiceAccountName, "webhook-service-account-name", "dependency-webhook", "Service account name of the webhook server (for RBAC binding)")
+	flag.StringVar(&webhookServiceAccountNamespace, "webhook-service-account-namespace", "default", "Namespace of the webhook server's service account")
 	flag.StringVar(&webhookURL, "webhook-url", "", "URL of the dependency-webhook server (e.g. https://dependency-webhook.ns.svc:443/validate)")
 	flag.StringVar(&webhookCABundlePath, "webhook-ca-bundle-path", "", "Path to CA bundle PEM file for the webhook server's TLS certificate")
 	flag.StringVar(&healthProbeBindAddress, "health-probe-bind-address", ":8081", "Address to bind the health probe endpoint")
@@ -103,23 +97,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create RBAC manager targeting system:master workspace via the root shard.
-	rbacCfg := rest.CopyConfig(cfg)
-	if rootShardHost != "" {
-		rbacCfg.Host = rootShardHost
-	}
-	rbacCfg.Host += logicalcluster.NewPath(systemMasterPath).RequestPath()
-
-	systemMasterClient, err := client.New(rbacCfg, client.Options{Scheme: scheme})
-	if err != nil {
-		setupLog.Error(err, "unable to create system:master client")
-		os.Exit(1)
-	}
-
+	// Create RBAC manager. Uses the base config to create per-workspace clients
+	// for managing apiexports/content RBAC in each provider workspace.
 	rbacMgr := &controller.RBACManager{
-		Client:                  systemMasterClient,
-		ServiceAccountName:      serviceAccountName,
-		ServiceAccountNamespace: serviceAccountNamespace,
+		BaseConfig:              baseCfg,
+		ServiceAccountName:      webhookServiceAccountName,
+		ServiceAccountNamespace: webhookServiceAccountNamespace,
 	}
 
 	// Register the multicluster DependencyRule reconciler.

@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -29,7 +28,7 @@ type DependencyRuleReconciler struct {
 	// workspaces. Nil if webhook installation is not configured.
 	WebhookInstaller *WebhookInstaller
 
-	// RBACManager manages the ClusterRole in system:master. Nil if not configured.
+	// RBACManager manages RBAC in provider workspaces. Nil if not configured.
 	RBACManager *RBACManager
 }
 
@@ -40,7 +39,7 @@ func NewDependencyRuleReconciler(depCtrlMgr mcmanager.Manager) *DependencyRuleRe
 }
 
 // Reconcile handles DependencyRule events: installs/removes webhooks and
-// reconciles RBAC in system:master.
+// reconciles RBAC in provider workspaces.
 func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("rule", req.Name, "cluster", req.ClusterName)
 
@@ -70,13 +69,11 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 	}
 
 	if r.RBACManager != nil {
-		dep := rule.Spec.Dependent
-		gvr := schema.GroupVersionResource{
-			Group:    dep.Group,
-			Version:  dep.Version,
-			Resource: dep.Resource,
+		ref := ExportRef{
+			WorkspacePath: rule.Spec.Dependent.APIExportRef.Path,
+			ExportName:    rule.Spec.Dependent.APIExportRef.Name,
 		}
-		r.RBACManager.TrackRule(ruleKey, gvr)
+		r.RBACManager.TrackRule(ruleKey, ref)
 		if err := r.RBACManager.Reconcile(ctx); err != nil {
 			logger.Error(err, "failed to reconcile RBAC")
 			return ctrl.Result{}, err
@@ -97,8 +94,8 @@ func (r *DependencyRuleReconciler) handleDeletion(ctx context.Context, key, rule
 	}
 
 	if r.RBACManager != nil {
-		r.RBACManager.RemoveRule(key)
-		if err := r.RBACManager.Reconcile(ctx); err != nil {
+		affectedWS := r.RBACManager.RemoveRule(key)
+		if err := r.RBACManager.Reconcile(ctx, affectedWS); err != nil {
 			logger.Error(err, "failed to reconcile RBAC after rule deletion")
 			// Non-fatal: the role may have stale entries but won't break anything.
 		}

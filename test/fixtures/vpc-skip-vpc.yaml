@@ -1,0 +1,7 @@
+apiVersion: network.test.io/v1
+kind: VPC
+metadata:
+  name: skip-vpc
+  namespace: default
+spec:
+  cidr: "10.3.0.0/16"

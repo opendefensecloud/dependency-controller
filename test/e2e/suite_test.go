@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,13 +29,14 @@ var (
 )
 
 const (
-	kindClusterName = "dep-ctrl-e2e"
-	kcpNamespace    = "kcp-system"
-	depNamespace    = "dependency-system"
-	kcpNodePort     = "31500"
-	certManagerVer  = "v1.17.2"
-	imageName       = "dependency-controller:integration-test"
-	helmTimeout     = "300s"
+	kindClusterName    = "dep-ctrl-e2e"
+	kcpNamespace       = "kcp-system"
+	depNamespace       = "dependency-system"
+	kcpNodePort        = "31500"
+	kcpServerLocalPort = "31501" // NodePort to kcp server (not front-proxy)
+	certManagerVer     = "v1.17.2"
+	imageName          = "dependency-controller:integration-test"
+	helmTimeout        = "300s"
 )
 
 // Workspace names under root.
@@ -140,6 +142,93 @@ func kcpctlRootNoFail(args ...string) (string, error) {
 	}, args...)...)
 }
 
+// subjectAccessReview is the JSON structure for a SubjectAccessReview response.
+type subjectAccessReview struct {
+	Status struct {
+		Allowed bool   `json:"allowed"`
+		Reason  string `json:"reason"`
+	} `json:"status"`
+}
+
+// webhookSACanAccessExport checks if the webhook SA has apiexports/content
+// access for the given APIExport in the specified workspace, using a
+// SubjectAccessReview evaluated by kcp.
+func webhookSACanAccessExport(wsPath, exportName string) (bool, error) {
+	sarJSON := fmt.Sprintf(`{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:%s:dependency-webhook",
+    "groups": ["system:serviceaccounts", "system:serviceaccounts:%s"],
+    "resourceAttributes": {
+      "group": "apis.kcp.io",
+      "resource": "apiexports",
+      "subresource": "content",
+      "name": %q,
+      "verb": "get"
+    }
+  }
+}`, depNamespace, depNamespace, exportName)
+
+	cmd := exec.CommandContext(context.Background(), kubectlBin,
+		"--kubeconfig", kcpHostKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
+		"create", "-f", "-", "-o", "json",
+	)
+	cmd.Stdin = strings.NewReader(sarJSON)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("SAR failed in %s: %s %v", wsPath, buf.String(), err)
+	}
+
+	var sar subjectAccessReview
+	if err := json.Unmarshal(buf.Bytes(), &sar); err != nil {
+		return false, fmt.Errorf("parsing SAR response: %w", err)
+	}
+
+	return sar.Status.Allowed, nil
+}
+
+// webhookSACanAccessResource checks if the webhook SA can access a specific
+// resource type in a workspace, using a SubjectAccessReview.
+func webhookSACanAccessResource(wsPath, group, resource, verb string) (bool, error) {
+	sarJSON := fmt.Sprintf(`{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:%s:dependency-webhook",
+    "groups": ["system:serviceaccounts", "system:serviceaccounts:%s"],
+    "resourceAttributes": {
+      "group": %q,
+      "resource": %q,
+      "verb": %q
+    }
+  }
+}`, depNamespace, depNamespace, group, resource, verb)
+
+	cmd := exec.CommandContext(context.Background(), kubectlBin,
+		"--kubeconfig", kcpHostKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
+		"create", "-f", "-", "-o", "json",
+	)
+	cmd.Stdin = strings.NewReader(sarJSON)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("SAR failed in %s: %s %v", wsPath, buf.String(), err)
+	}
+
+	var sar subjectAccessReview
+	if err := json.Unmarshal(buf.Bytes(), &sar); err != nil {
+		return false, fmt.Errorf("parsing SAR response: %w", err)
+	}
+
+	return sar.Status.Allowed, nil
+}
+
 // applyFixtureToWS applies a YAML fixture to a kcp workspace with placeholder substitution.
 func applyFixtureToWS(wsPath, file string, substitutions map[string]string) {
 	GinkgoHelper()
@@ -219,11 +308,17 @@ var _ = SynchronizedBeforeSuite(func() {
 	By("building admin kubeconfigs")
 	buildAdminKubeconfigs()
 
+	By("exposing kcp server via NodePort")
+	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-server-nodeport.yaml"))
+
 	By("building and loading image")
 	buildAndLoadImage()
 
 	By("setting up kcp workspaces")
 	setupKCPWorkspaces()
+
+	By("bootstrapping RBAC in root workspace")
+	bootstrapRootRBAC()
 
 	By("deploying helm charts")
 	deployCharts()
@@ -247,6 +342,8 @@ func createKindCluster() {
 	out, _ := runNoFail(kindBin, "get", "clusters")
 	for line := range strings.SplitSeq(out, "\n") {
 		if strings.TrimSpace(line) == kindClusterName {
+			// Ensure kubeconfig context exists (may be lost after kind delete/recreate).
+			run(kindBin, "export", "kubeconfig", "--name", kindClusterName)
 			return
 		}
 	}
@@ -354,6 +451,48 @@ func buildAdminKubeconfigs() {
 	run(kubectlBin, "--kubeconfig", internalKubeconfig, "config", "use-context", "kcp")
 }
 
+// bootstrapRootRBAC uses the bootstrap (system:masters) cert to create
+// minimal RBAC in the root workspace, granting the webhook SA workspace
+// access so it can enter child workspaces through virtual workspace endpoints.
+func bootstrapRootRBAC() {
+	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-bootstrap-cert.yaml"))
+
+	waitFor(time.Minute, "bootstrap cert issued", func() error {
+		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-bootstrap-cert",
+			"-o", "jsonpath={.data.tls\\.crt}")
+		return err
+	})
+
+	bsCrt := secretField("kcp-bootstrap-cert", "{.data.tls\\.crt}")
+	bsKey := secretField("kcp-bootstrap-cert", "{.data.tls\\.key}")
+	kcpServerCA := secretField("kcp-ca", "{.data.tls\\.crt}")
+
+	bsCrtFile := filepath.Join(tmpDir, "bootstrap-client.crt")
+	bsKeyFile := filepath.Join(tmpDir, "bootstrap-client.key")
+	caFile := filepath.Join(tmpDir, "kcp-server-ca.crt")
+	Expect(os.WriteFile(bsCrtFile, bsCrt, 0o600)).To(Succeed())
+	Expect(os.WriteFile(bsKeyFile, bsKey, 0o600)).To(Succeed())
+	Expect(os.WriteFile(caFile, kcpServerCA, 0o600)).To(Succeed())
+
+	// Build a temporary bootstrap kubeconfig targeting root via kcp server NodePort.
+	bsKubeconfig := filepath.Join(tmpDir, "kcp-bootstrap.kubeconfig")
+	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "set-cluster", "kcp",
+		fmt.Sprintf("--server=https://localhost:%s/clusters/root", kcpServerLocalPort),
+		"--certificate-authority="+caFile,
+		"--embed-certs=true")
+	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "set-credentials", "bootstrap",
+		"--client-certificate="+bsCrtFile,
+		"--client-key="+bsKeyFile,
+		"--embed-certs=true")
+	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "set-context", "kcp",
+		"--cluster=kcp", "--user=bootstrap")
+	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "use-context", "kcp")
+
+	// Apply the minimal RBAC fixtures in the root workspace.
+	run(kubectlBin, "--kubeconfig", bsKubeconfig, "apply", "-f",
+		filepath.Join(fixturesDir, "root-rbac-bootstrap.yaml"))
+}
+
 func buildAndLoadImage() {
 	run(dockerBin, "build", "-t", imageName, rootDir)
 	run(kindBin, "load", "docker-image", imageName, "--name", kindClusterName)
@@ -445,14 +584,13 @@ metadata:
 	}
 }
 
-func deployCharts() {
-	kindctlNoFail("create", "namespace", depNamespace) //nolint:errcheck
-
-	// Create kubeconfig secret for in-cluster pods.
-	internalKubeconfig := filepath.Join(tmpDir, "kcp-internal.kubeconfig")
+// createKubeconfigSecret creates or updates a Secret in the dep-ctrl namespace
+// containing the given kubeconfig file.
+func createKubeconfigSecret(secretName, kubeconfigPath string) {
+	GinkgoHelper()
 	cmd := exec.CommandContext(context.Background(), kubectlBin, "--context", "kind-"+kindClusterName,
-		"-n", depNamespace, "create", "secret", "generic", "kcp-kubeconfig",
-		"--from-file=kubeconfig="+internalKubeconfig,
+		"-n", depNamespace, "create", "secret", "generic", secretName,
+		"--from-file=kubeconfig="+kubeconfigPath,
 		"--dry-run=client", "-o", "yaml")
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -464,6 +602,12 @@ func deployCharts() {
 	applyCmd.Stdout = &applyBuf
 	applyCmd.Stderr = &applyBuf
 	Expect(applyCmd.Run()).To(Succeed(), applyBuf.String())
+}
+
+func deployCharts() {
+	kindctlNoFail("create", "namespace", depNamespace) //nolint:errcheck
+
+	createKubeconfigSecret("kcp-kubeconfig", filepath.Join(tmpDir, "kcp-internal.kubeconfig"))
 
 	run(helmBin, "upgrade", "--install", "dep-webhook",
 		filepath.Join(rootDir, "charts/dependency-webhook"),

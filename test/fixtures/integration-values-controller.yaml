@@ -9,9 +9,11 @@ kubeconfig:
   key: kubeconfig
 
 kcpBaseHost: "https://kcp.kcp-system.svc.cluster.local:6443"
-rootShardHost: "https://kcp.kcp-system.svc.cluster.local:6443"
 
 webhook:
   url: https://dep-webhook-dependency-webhook.dependency-system.svc.cluster.local/validate
   caBundle:
     secretName: dep-webhook-dependency-webhook-tls
+  serviceAccount:
+    name: dependency-webhook
+    namespace: dependency-system

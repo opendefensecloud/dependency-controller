@@ -40,6 +40,43 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		})
 	})
 
+	It("should grant webhook SA apiexports/content access for dependent resource APIExport", func() {
+		// The controller creates RBAC in the compute-provider workspace granting
+		// the webhook SA apiexports/content on the compute.test.io APIExport.
+		// This allows the webhook to read VirtualMachines across consumer
+		// workspaces via the APIExport virtual workspace.
+
+		By("waiting for webhook SA to have apiexports/content on compute.test.io in compute-provider")
+		waitFor(time.Minute, "webhook SA has apiexports/content on compute.test.io", func() error {
+			allowed, err := webhookSACanAccessExport(wsComputeProvider, "compute.test.io")
+			if err != nil {
+				return fmt.Errorf("SAR check: %w", err)
+			}
+			if !allowed {
+				return fmt.Errorf("webhook SA does not yet have apiexports/content on compute.test.io")
+			}
+			return nil
+		})
+
+		By("verifying webhook SA does NOT have apiexports/content on network.test.io in network-provider")
+		allowed, err := webhookSACanAccessExport(wsNetworkProvider, "network.test.io")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(allowed).To(BeFalse(),
+			"webhook SA should NOT have apiexports/content on network.test.io (dependency target, not dependent)")
+
+		By("verifying webhook SA does NOT have apiexports/content on unrelated exports")
+		allowed, err = webhookSACanAccessExport(wsComputeProvider, "nonexistent-export")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(allowed).To(BeFalse(),
+			"webhook SA should NOT have apiexports/content on unrelated APIExports")
+
+		By("verifying webhook SA cannot access secrets in compute-provider")
+		allowed, err = webhookSACanAccessResource(wsComputeProvider, "", "secrets", "list")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(allowed).To(BeFalse(),
+			"webhook SA should NOT be able to list secrets")
+	})
+
 	It("should block VPC deletion while a VM references it", func() {
 		waitFor(time.Minute, "webhook blocks VPC deletion", func() error {
 			out, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "my-vpc", "--namespace", "default")
@@ -56,6 +93,47 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		})
 	})
 
+	It("should still block VPC deletion when one of multiple dependents is removed", func() {
+		By("creating a second VM referencing the same VPC")
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-second-vm.yaml"), nil)
+
+		By("waiting for second VM to be indexed")
+		waitFor(30*time.Second, "second VM indexed", func() error {
+			out, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "my-vpc", "--namespace", "default")
+			if err != nil && strings.Contains(out, "second-vm") {
+				return nil
+			}
+
+			return fmt.Errorf("second-vm not yet in blockers: %s", out)
+		})
+
+		By("deleting the first VM")
+		kcpctl(wsConsumer1, "delete", "virtualmachine", "my-vm", "--namespace", "default")
+
+		By("verifying VPC deletion is still blocked by second-vm")
+		waitFor(30*time.Second, "VPC still blocked by second-vm", func() error {
+			out, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "my-vpc", "--namespace", "default")
+			if err == nil {
+				applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-my-vpc.yaml"), nil)
+				return fmt.Errorf("deletion was not blocked, recreated VPC")
+			}
+			if strings.Contains(out, "still referenced by") {
+				return nil
+			}
+
+			return fmt.Errorf("unexpected output: %s", out)
+		})
+
+		By("deleting the second VM")
+		kcpctl(wsConsumer1, "delete", "virtualmachine", "second-vm", "--namespace", "default")
+
+		By("verifying VPC deletion now succeeds")
+		waitFor(time.Minute, "VPC deletion allowed after all VMs removed", func() error {
+			_, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "my-vpc", "--namespace", "default")
+			return err
+		})
+	})
+
 	It("should not affect consumer2 where there are no VMs", func() {
 		applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vpc-isolated-vpc.yaml"), nil)
 
@@ -65,16 +143,40 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		})
 	})
 
-	It("should allow VPC deletion after the dependent VM is deleted", func() {
-		kcpctl(wsConsumer1, "delete", "virtualmachine", "my-vm", "--namespace", "default")
+	It("should allow deletion when skip-protection annotation is set", func() {
+		By("creating a VPC and VM in consumer1")
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-skip-vpc.yaml"), nil)
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-skip-vm.yaml"), nil)
 
-		waitFor(time.Minute, "VPC deletion allowed after VM removal", func() error {
-			_, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "my-vpc", "--namespace", "default")
+		By("waiting for webhook to block skip-vpc deletion")
+		waitFor(time.Minute, "webhook blocks skip-vpc deletion", func() error {
+			out, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "skip-vpc", "--namespace", "default")
+			if err == nil {
+				applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-skip-vpc.yaml"), nil)
+				return fmt.Errorf("deletion was not blocked, recreated VPC")
+			}
+			if strings.Contains(out, "still referenced by") {
+				return nil
+			}
+
+			return fmt.Errorf("unexpected output: %s", out)
+		})
+
+		By("annotating VPC with skip-protection")
+		kcpctl(wsConsumer1, "annotate", "vpc", "skip-vpc", "--namespace", "default",
+			"dependencies.opendefense.cloud/skip-protection=true")
+
+		By("verifying VPC deletion succeeds despite active dependent")
+		waitFor(30*time.Second, "skip-protection allows deletion", func() error {
+			_, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "skip-vpc", "--namespace", "default")
 			return err
 		})
+
+		By("cleaning up the orphaned VM")
+		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "skip-vm", "--namespace", "default") //nolint:errcheck
 	})
 
-	It("should remove webhook after DependencyRule is deleted", func() {
+	It("should remove webhook and RBAC after DependencyRule is deleted", func() {
 		By("creating VPC and VM for cleanup test")
 		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-cleanup-vpc.yaml"), nil)
 		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-cleanup-vm.yaml"), nil)
@@ -112,7 +214,68 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			return err
 		}()).To(Succeed())
 
+		By("verifying webhook SA loses apiexports/content access after rule deletion")
+		waitFor(30*time.Second, "webhook SA loses apiexports/content on compute.test.io", func() error {
+			allowed, err := webhookSACanAccessExport(wsComputeProvider, "compute.test.io")
+			if err != nil {
+				return fmt.Errorf("SAR check: %w", err)
+			}
+			if allowed {
+				return fmt.Errorf("webhook SA still has apiexports/content on compute.test.io after rule deletion")
+			}
+			return nil
+		})
+
 		// Clean up remaining resources.
 		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "cleanup-vm", "--namespace", "default") //nolint:errcheck
+	})
+
+	It("should restore protection after DependencyRule is recreated", func() {
+		By("creating a VPC and VM in consumer1")
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-recreate-vpc.yaml"), nil)
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-recreate-vm.yaml"), nil)
+
+		By("recreating the DependencyRule")
+		applyFixtureToWS(wsComputeProvider, filepath.Join(fixturesDir, "dependencyrule-vm-dependencies.yaml"), subs)
+
+		By("waiting for webhook to be reinstalled in network-provider")
+		waitFor(time.Minute, "webhook reinstalled in network-provider", func() error {
+			_, err := kcpctlNoFail(wsNetworkProvider, "get", "validatingwebhookconfiguration", "dependency-controller")
+			return err
+		})
+
+		By("verifying webhook SA regains apiexports/content access")
+		waitFor(time.Minute, "webhook SA has apiexports/content on compute.test.io after recreation", func() error {
+			allowed, err := webhookSACanAccessExport(wsComputeProvider, "compute.test.io")
+			if err != nil {
+				return fmt.Errorf("SAR check: %w", err)
+			}
+			if !allowed {
+				return fmt.Errorf("webhook SA does not yet have apiexports/content on compute.test.io")
+			}
+			return nil
+		})
+
+		By("waiting for webhook to block recreate-vpc deletion")
+		waitFor(time.Minute, "webhook blocks recreate-vpc deletion after rule recreation", func() error {
+			out, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "recreate-vpc", "--namespace", "default")
+			if err == nil {
+				applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-recreate-vpc.yaml"), nil)
+				return fmt.Errorf("deletion was not blocked, recreated VPC")
+			}
+			if strings.Contains(out, "still referenced by") {
+				return nil
+			}
+
+			return fmt.Errorf("unexpected output: %s", out)
+		})
+
+		By("cleaning up")
+		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "recreate-vm", "--namespace", "default") //nolint:errcheck
+		waitFor(30*time.Second, "recreate-vpc deletion after cleanup", func() error {
+			_, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "recreate-vpc", "--namespace", "default")
+			return err
+		})
+		kcpctlNoFail(wsComputeProvider, "delete", "dependencyrule", "vm-dependencies") //nolint:errcheck
 	})
 })

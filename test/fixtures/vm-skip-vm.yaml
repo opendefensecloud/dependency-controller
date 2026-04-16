@@ -1,0 +1,9 @@
+apiVersion: compute.test.io/v1
+kind: VirtualMachine
+metadata:
+  name: skip-vm
+  namespace: default
+spec:
+  cpu: 2
+  vpcRef:
+    name: skip-vpc

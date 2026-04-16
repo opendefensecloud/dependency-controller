@@ -30,12 +30,8 @@ spec:
             {{- if .Values.kcpBaseHost }}
             - --kcp-base-host={{ .Values.kcpBaseHost }}
             {{- end }}
-            {{- if .Values.rootShardHost }}
-            - --root-shard-host={{ .Values.rootShardHost }}
-            {{- end }}
-            - --system-master-path={{ .Values.systemMasterPath }}
-            - --service-account-name={{ include "dependency-controller.serviceAccountName" . }}
-            - --service-account-namespace={{ .Values.serviceAccount.namespace | default .Release.Namespace }}
+            - --webhook-service-account-name={{ .Values.webhook.serviceAccount.name }}
+            - --webhook-service-account-namespace={{ .Values.webhook.serviceAccount.namespace | default .Release.Namespace }}
             {{- if .Values.webhook.url }}
             - --webhook-url={{ .Values.webhook.url }}
             {{- end }}

@@ -12,12 +12,6 @@ apiExportName: dependencies.opendefense.cloud
 # Base kcp host URL (without workspace path). If empty, derived from kubeconfig.
 kcpBaseHost: ""
 
-# Direct URL of the root shard (bypasses kcp front proxy).
-# Required for RBAC management in system:master.
-rootShardHost: ""
-
-systemMasterPath: "system:master"
-
 # Secret containing a kubeconfig for connecting to kcp.
 # Required when the controller runs outside kcp (e.g., in a management cluster).
 kubeconfig:
@@ -35,6 +29,13 @@ webhook:
   # typically "<webhook-release>-dependency-webhook-tls".
   caBundle:
     secretName: ""
+
+  # Webhook server's service account. The controller creates RBAC in provider
+  # workspaces granting this identity apiexports/content access so the webhook
+  # can read dependent resources via virtual workspaces.
+  serviceAccount:
+    name: dependency-webhook
+    namespace: ""
 
 serviceAccount:
   create: true
