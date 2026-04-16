@@ -58,12 +58,17 @@ func NewRuleRegistry() *RuleRegistry {
 }
 
 // Register adds a rule to the registry and rebuilds the reverse index.
-func (r *RuleRegistry) Register(key string, state *RuleState) {
+// If a state was already registered under this key, it is replaced and
+// the old state is returned so the caller can clean it up.
+func (r *RuleRegistry) Register(key string, state *RuleState) *RuleState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	old := r.rules[key]
 	r.rules[key] = state
 	r.rebuildTargetIndex()
+
+	return old
 }
 
 // Unregister removes a rule from the registry, cancels its manager, and
@@ -196,12 +201,24 @@ func (r *RuleRegistry) TrackCluster(key, clusterName string) {
 	state.knownClusters[clusterName] = struct{}{}
 }
 
+// IsReady returns true if the rule's cache is synced and ready for queries.
+func (s *RuleState) IsReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.Ready
+}
+
 // MarkReady marks a rule's cache as synced and ready for queries.
 func (r *RuleRegistry) MarkReady(key string) {
 	r.mu.RLock()
 	state := r.rules[key]
 	r.mu.RUnlock()
-	if state != nil {
-		state.Ready = true
+	if state == nil {
+		return
 	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.Ready = true
 }

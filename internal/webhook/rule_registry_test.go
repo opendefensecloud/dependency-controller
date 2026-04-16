@@ -4,6 +4,8 @@
 package webhook
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -176,13 +178,13 @@ func TestRuleRegistry_MarkReady(t *testing.T) {
 	state := &RuleState{Cancel: func() {}}
 	r.Register("c1/rule", state)
 
-	if state.Ready {
+	if state.IsReady() {
 		t.Error("expected Ready=false initially")
 	}
 
 	r.MarkReady("c1/rule")
 
-	if !state.Ready {
+	if !state.IsReady() {
 		t.Error("expected Ready=true after MarkReady")
 	}
 }
@@ -191,4 +193,149 @@ func TestRuleRegistry_UnregisterNonexistent(t *testing.T) {
 	r := NewRuleRegistry()
 	// Should not panic.
 	r.Unregister("nonexistent")
+}
+
+func TestRuleRegistry_AllTargetGVRs(t *testing.T) {
+	r := NewRuleRegistry()
+
+	vpcGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"}
+	subnetGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "subnets"}
+
+	r.Register("c1/rule1", &RuleState{
+		Cancel:      func() {},
+		IndexFields: []IndexedField{{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR}},
+	})
+	r.Register("c1/rule2", &RuleState{
+		Cancel: func() {},
+		IndexFields: []IndexedField{
+			{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR},
+			{FieldPath: ".spec.subnetRef.name", TargetGVR: subnetGVR},
+		},
+	})
+
+	gvrs := r.AllTargetGVRs()
+	if len(gvrs) != 2 {
+		t.Errorf("expected 2 target GVRs, got %d", len(gvrs))
+	}
+}
+
+func TestRuleRegistry_GetNil(t *testing.T) {
+	r := NewRuleRegistry()
+	if r.Get("nonexistent") != nil {
+		t.Error("expected nil for nonexistent key")
+	}
+}
+
+func TestRuleRegistry_MarkReadyNonexistent(t *testing.T) {
+	r := NewRuleRegistry()
+	// Should not panic.
+	r.MarkReady("nonexistent")
+}
+
+func TestRuleRegistry_TrackClusterNonexistent(t *testing.T) {
+	r := NewRuleRegistry()
+	// Should not panic.
+	r.TrackCluster("nonexistent", "cluster1")
+}
+
+func TestRuleRegistry_ConcurrentAccess(t *testing.T) {
+	r := NewRuleRegistry()
+	vpcGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"}
+
+	const goroutines = 20
+	const opsPerGoroutine = 100
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	for i := range goroutines {
+		go func(id int) {
+			defer wg.Done()
+			key := fmt.Sprintf("cluster%d/rule%d", id%5, id)
+
+			for j := range opsPerGoroutine {
+				switch j % 7 {
+				case 0:
+					r.Register(key, &RuleState{
+						Cancel:      func() {},
+						IndexFields: []IndexedField{{FieldPath: ".spec.ref", TargetGVR: vpcGVR}},
+						Rule: v1alpha1.DependencyRuleSpec{
+							Dependent: v1alpha1.DependentRef{Group: "compute.io", Version: "v1", Resource: "vms"},
+						},
+					})
+				case 1:
+					r.FindByTargetGVR(vpcGVR)
+				case 2:
+					r.Exists(key)
+				case 3:
+					r.Get(key)
+				case 4:
+					r.TrackCluster(key, fmt.Sprintf("consumer-%d", j))
+				case 5:
+					r.MarkReady(key)
+				case 6:
+					r.AllTargetGVRs()
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Final cleanup: unregister all concurrently.
+	wg.Add(goroutines)
+	for i := range goroutines {
+		go func(id int) {
+			defer wg.Done()
+			key := fmt.Sprintf("cluster%d/rule%d", id%5, id)
+			r.Unregister(key)
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+func TestRuleRegistry_RegisterOverwrite(t *testing.T) {
+	r := NewRuleRegistry()
+
+	vpcGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"}
+	subnetGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "subnets"}
+
+	oldState := &RuleState{
+		Cancel:      func() {},
+		IndexFields: []IndexedField{{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR}},
+	}
+	old := r.Register("c1/rule", oldState)
+	if old != nil {
+		t.Error("expected nil old state on first register")
+	}
+
+	// Overwrite with new state targeting a different GVR.
+	old = r.Register("c1/rule", &RuleState{
+		Cancel:      func() {},
+		IndexFields: []IndexedField{{FieldPath: ".spec.subnetRef.name", TargetGVR: subnetGVR}},
+	})
+	if old != oldState {
+		t.Error("expected old state to be returned on overwrite")
+	}
+
+	// Old target should no longer be in the index.
+	entries := r.FindByTargetGVR(vpcGVR)
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries for old GVR after overwrite, got %d", len(entries))
+	}
+
+	// New target should be in the index.
+	entries = r.FindByTargetGVR(subnetGVR)
+	if len(entries) != 1 {
+		t.Errorf("expected 1 entry for new GVR after overwrite, got %d", len(entries))
+	}
+}
+
+func TestRuleRegistry_RegisterFirstReturnsNil(t *testing.T) {
+	r := NewRuleRegistry()
+	old := r.Register("c1/rule", &RuleState{Cancel: func() {}})
+	if old != nil {
+		t.Error("expected nil when registering a new key")
+	}
 }

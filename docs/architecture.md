@@ -138,20 +138,20 @@ On deletion it:
 2. **Updates RBAC** -- reconciles the ClusterRole to remove the deleted
    rule's dependent GVR if no other rules reference it.
 
-### DependencyRule Watcher (Webhook Server)
+### Rule Cache Manager (Webhook Server)
 
-**File:** `internal/webhook/rule_watcher.go`
+**File:** `internal/webhook/rule_cache_manager.go`
 
-Watches `DependencyRule` objects via the dep-ctrl APIExport and manages per-rule
-multicluster managers with indexed caches. Runs inside the webhook server binary.
+Reconciles `DependencyRule` objects via the dep-ctrl APIExport and manages a
+dedicated indexed cache per rule. Runs inside the webhook server binary.
 
 On reconcile it:
 
 1. **Ensures an indexed cache** -- for each DependencyRule, creates a
-   dedicated multicluster manager backed by the referenced APIExport's virtual
-   workspace. Field indices are registered on the dependent informer for each
-   dependency target's field path (e.g., `.spec.vpcRef.name`). The manager
-   and indices are stored in the `RuleRegistry`.
+   dedicated multicluster manager connected to the provider's APIExport virtual
+   workspace. Field indices are registered on the dependent resource's informer
+   for each dependency target's field path (e.g., `.spec.vpcRef.name`). The
+   manager and indices are stored in the `RuleRegistry`.
 
 On deletion it:
 
@@ -166,7 +166,7 @@ clean lifecycle management: when a rule is deleted, its manager can be cancelled
 without affecting other rules -- even if two rules reference the same APIExport.
 
 Managers are keyed by `clusterName/ruleName` in the `RuleRegistry` and started
-in background goroutines. On deletion, the watcher unregisters from the
+in background goroutines. On deletion, the cache manager unregisters from the
 registry which cancels the manager context.
 
 ### Rule Registry

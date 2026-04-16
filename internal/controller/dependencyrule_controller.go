@@ -20,7 +20,7 @@ import (
 // DependencyRuleReconciler watches DependencyRule objects across provider workspaces
 // via the dep-ctrl's own APIExport. It handles webhook installation and RBAC
 // management. Per-rule indexed caches are managed by the webhook server's
-// DependencyRuleWatcher instead.
+// RuleCacheManager instead.
 type DependencyRuleReconciler struct {
 	// DepCtrlManager is the multicluster manager for the dep-ctrl's APIExport.
 	DepCtrlManager mcmanager.Manager

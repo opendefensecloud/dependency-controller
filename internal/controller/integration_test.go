@@ -189,10 +189,10 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
-		// Create the webhook-side rule watcher and registry.
+		// Create the rule cache manager and registry.
 		registry := depwebhook.NewRuleRegistry()
 
-		ruleWatcher := &depwebhook.DependencyRuleWatcher{
+		cacheMgr := &depwebhook.RuleCacheManager{
 			DepCtrlManager: mgr,
 			BaseConfig:     kcpConfig,
 			Scheme:         scheme.Scheme,
@@ -201,15 +201,15 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		}
 
 		err = mcbuilder.ControllerManagedBy(mgr).
-			Named("dependencyrule-watcher").
+			Named("rule-cache-manager").
 			For(&v1alpha1.DependencyRule{}).
-			Complete(mcreconcile.Func(ruleWatcher.Reconcile))
+			Complete(mcreconcile.Func(cacheMgr.Reconcile))
 		Expect(err).NotTo(HaveOccurred())
 
 		// Populate the registry before serving webhook requests.
 		initialized := make(chan struct{})
 		err = mgr.GetLocalManager().Add(manager.RunnableFunc(func(ctx context.Context) error {
-			if err := ruleWatcher.PopulateRegistry(ctx); err != nil {
+			if err := cacheMgr.PopulateRegistry(ctx); err != nil {
 				return err
 			}
 			close(initialized)

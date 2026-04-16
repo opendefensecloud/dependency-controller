@@ -90,10 +90,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create rule registry and watcher.
+	// Create rule registry and cache manager.
 	registry := webhook.NewRuleRegistry()
 
-	watcher := &webhook.DependencyRuleWatcher{
+	cacheMgr := &webhook.RuleCacheManager{
 		DepCtrlManager: mgr,
 		BaseConfig:     baseCfg,
 		Scheme:         scheme,
@@ -102,10 +102,10 @@ func main() {
 	}
 
 	if err := mcbuilder.ControllerManagedBy(mgr).
-		Named("dependencyrule-watcher").
+		Named("rule-cache-manager").
 		For(&v1alpha1.DependencyRule{}).
-		Complete(mcreconcile.Func(watcher.Reconcile)); err != nil {
-		setupLog.Error(err, "unable to create DependencyRule watcher controller")
+		Complete(mcreconcile.Func(cacheMgr.Reconcile)); err != nil {
+		setupLog.Error(err, "unable to create rule cache manager controller")
 		os.Exit(1)
 	}
 
@@ -114,7 +114,7 @@ func main() {
 	// from the APIExport virtual workspace.
 	initialized := make(chan struct{})
 	if err := mgr.GetLocalManager().Add(manager.RunnableFunc(func(ctx context.Context) error {
-		if err := watcher.PopulateRegistry(ctx); err != nil {
+		if err := cacheMgr.PopulateRegistry(ctx); err != nil {
 			return err
 		}
 		close(initialized)

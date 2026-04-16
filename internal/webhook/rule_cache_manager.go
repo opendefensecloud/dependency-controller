@@ -27,17 +27,19 @@ import (
 	"go.opendefense.cloud/dependency-controller/internal/fieldpath"
 )
 
-// DependencyRuleWatcher watches DependencyRule objects via the dep-ctrl APIExport
-// and manages per-rule multicluster managers with indexed caches. This is the
-// webhook server's own reconciler — it does not depend on the controller.
-type DependencyRuleWatcher struct {
+// RuleCacheManager reconciles DependencyRule objects and manages a dedicated
+// indexed cache per rule. Each rule's dependent resource type (e.g., VirtualMachine)
+// is watched through a multicluster manager connected to the provider's APIExport
+// virtual workspace. Field indices on the dependent resources allow the
+// DeletionValidator to efficiently query "which dependents reference resource X?".
+type RuleCacheManager struct {
 	// DepCtrlManager is the multicluster manager for the dep-ctrl's APIExport.
 	DepCtrlManager mcmanager.Manager
 
 	// BaseConfig is the root kcp REST config (no workspace path suffix).
 	BaseConfig *rest.Config
 
-	// Scheme is the runtime scheme used when creating dynamic managers.
+	// Scheme is the runtime scheme used when creating per-rule managers.
 	Scheme *runtime.Scheme
 
 	// APIExportName is the name of the dep-ctrl APIExport (and its
@@ -45,21 +47,18 @@ type DependencyRuleWatcher struct {
 	// during initial registry population.
 	APIExportName string
 
-	// Registry holds the rule state queried by the DeletionValidator.
+	// Registry holds the per-rule cache state queried by the DeletionValidator.
 	Registry *RuleRegistry
 }
 
-// PopulateRegistry performs an initial population of the rule registry by
-// listing all existing DependencyRules from the APIExport virtual workspace.
-// It resolves the VW URL from the APIExportEndpointSlice, creates a client
-// for the wildcard cluster path, and processes every rule found.
-//
-// This must be called after the manager has started (e.g., from a
-// manager.Runnable) so that the APIExportEndpointSlice is available.
-func (w *DependencyRuleWatcher) PopulateRegistry(ctx context.Context) error {
-	logger := log.FromContext(ctx).WithName("rule-watcher")
+// PopulateRegistry lists all existing DependencyRules from the APIExport virtual
+// workspace and ensures an indexed cache exists for each one. This must be called
+// after the manager has started (e.g., from a manager.Runnable) so that the
+// APIExportEndpointSlice is available.
+func (m *RuleCacheManager) PopulateRegistry(ctx context.Context) error {
+	logger := log.FromContext(ctx).WithName("rule-cache-manager")
 
-	vwClient, err := w.virtualWorkspaceClient(ctx)
+	vwClient, err := m.virtualWorkspaceClient(ctx)
 	if err != nil {
 		return fmt.Errorf("creating virtual workspace client: %w", err)
 	}
@@ -75,7 +74,7 @@ func (w *DependencyRuleWatcher) PopulateRegistry(ctx context.Context) error {
 		rule := &ruleList.Items[i]
 		clusterName := logicalcluster.From(rule)
 		key := ruleStateKey(clusterName.String(), rule.Name)
-		if err := w.ensureWatcher(ctx, key, rule); err != nil {
+		if err := m.ensureCache(ctx, key, rule); err != nil {
 			return fmt.Errorf("populating rule %s/%s: %w", clusterName, rule.Name, err)
 		}
 	}
@@ -89,22 +88,22 @@ func (w *DependencyRuleWatcher) PopulateRegistry(ctx context.Context) error {
 // workspace to discover the virtual workspace URL, then returns a client
 // pointing at {vwURL}/clusters/* so it can list resources across all bound
 // workspaces.
-func (w *DependencyRuleWatcher) virtualWorkspaceClient(ctx context.Context) (client.Client, error) {
+func (m *RuleCacheManager) virtualWorkspaceClient(ctx context.Context) (client.Client, error) {
 	// Use a direct (non-cached) client to read the APIExportEndpointSlice
 	// from the dep-ctrl workspace.
-	localCfg := w.DepCtrlManager.GetLocalManager().GetConfig()
-	directClient, err := client.New(localCfg, client.Options{Scheme: w.Scheme})
+	localCfg := m.DepCtrlManager.GetLocalManager().GetConfig()
+	directClient, err := client.New(localCfg, client.Options{Scheme: m.Scheme})
 	if err != nil {
 		return nil, fmt.Errorf("creating direct client: %w", err)
 	}
 
 	var ess apisv1alpha1.APIExportEndpointSlice
-	if err := directClient.Get(ctx, client.ObjectKey{Name: w.APIExportName}, &ess); err != nil {
-		return nil, fmt.Errorf("getting APIExportEndpointSlice %s: %w", w.APIExportName, err)
+	if err := directClient.Get(ctx, client.ObjectKey{Name: m.APIExportName}, &ess); err != nil {
+		return nil, fmt.Errorf("getting APIExportEndpointSlice %s: %w", m.APIExportName, err)
 	}
 
 	if len(ess.Status.APIExportEndpoints) == 0 {
-		return nil, fmt.Errorf("APIExportEndpointSlice %s has no endpoints", w.APIExportName)
+		return nil, fmt.Errorf("APIExportEndpointSlice %s has no endpoints", m.APIExportName)
 	}
 
 	vwURL := ess.Status.APIExportEndpoints[0].URL
@@ -114,7 +113,7 @@ func (w *DependencyRuleWatcher) virtualWorkspaceClient(ctx context.Context) (cli
 	vwCfg := rest.CopyConfig(localCfg)
 	vwCfg.Host = vwURL + "/clusters/*"
 
-	vwClient, err := client.New(vwCfg, client.Options{Scheme: w.Scheme})
+	vwClient, err := client.New(vwCfg, client.Options{Scheme: m.Scheme})
 	if err != nil {
 		return nil, fmt.Errorf("creating VW client: %w", err)
 	}
@@ -122,12 +121,12 @@ func (w *DependencyRuleWatcher) virtualWorkspaceClient(ctx context.Context) (cli
 	return vwClient, nil
 }
 
-// Reconcile handles DependencyRule events. On creation/update it ensures a
-// per-rule indexed cache exists. On deletion it tears down the cache.
-func (w *DependencyRuleWatcher) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
+// Reconcile handles DependencyRule events. On creation/update it ensures an
+// indexed cache exists for the rule. On deletion it tears down the cache.
+func (m *RuleCacheManager) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("rule", req.Name, "cluster", req.ClusterName)
 
-	cl, err := w.DepCtrlManager.GetCluster(ctx, req.ClusterName)
+	cl, err := m.DepCtrlManager.GetCluster(ctx, req.ClusterName)
 	if err != nil {
 		logger.Error(err, "failed to get cluster")
 		return ctrl.Result{}, err
@@ -139,7 +138,7 @@ func (w *DependencyRuleWatcher) Reconcile(ctx context.Context, req mcreconcile.R
 	if err := cl.GetClient().Get(ctx, client.ObjectKey{Name: req.Name}, &rule); err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			logger.Info("DependencyRule deleted, tearing down cache")
-			w.Registry.Unregister(key)
+			m.Registry.Unregister(key)
 
 			return ctrl.Result{}, nil
 		}
@@ -147,26 +146,27 @@ func (w *DependencyRuleWatcher) Reconcile(ctx context.Context, req mcreconcile.R
 		return ctrl.Result{}, err
 	}
 
-	if err := w.ensureWatcher(ctx, key, &rule); err != nil {
-		logger.Error(err, "failed to ensure watcher")
+	if err := m.ensureCache(ctx, key, &rule); err != nil {
+		logger.Error(err, "failed to ensure cache for rule")
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
 }
 
-// ensureWatcher starts a multicluster manager for the given rule's dependent
-// resource type, registers field indices for each dependency target, and stores
-// the state in the registry. If the rule already exists, it is a no-op.
-func (w *DependencyRuleWatcher) ensureWatcher(ctx context.Context, key string, rule *v1alpha1.DependencyRule) error {
-	if w.Registry.Exists(key) {
+// ensureCache creates a multicluster manager for the rule's dependent resource
+// type, registers field indices for each dependency target, and stores the
+// resulting cache state in the registry. If a cache already exists for the
+// given key this is a no-op.
+func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, rule *v1alpha1.DependencyRule) error {
+	if m.Registry.Exists(key) {
 		return nil
 	}
 
 	ref := rule.Spec.Dependent.APIExportRef
 	dep := rule.Spec.Dependent
 
-	mgr, mgrCancel, err := w.createExportManager(ctx, ref)
+	mgr, mgrCancel, err := m.startProviderManager(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("creating manager for rule %s: %w", rule.Name, err)
 	}
@@ -213,15 +213,15 @@ func (w *DependencyRuleWatcher) ensureWatcher(ctx context.Context, key string, r
 		})
 	}
 
-	// Register a no-op controller to trigger the informer and track clusters.
-	registry := w.Registry
+	// Register a controller to activate the informer and track discovered clusters.
+	registry := m.Registry
 	ruleKey := key
 	if err := mcbuilder.ControllerManagedBy(mgr).
 		Named(fmt.Sprintf("dep-index-%s", key)).
 		For(watchObj).
 		Complete(mcreconcile.Func(func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 			registry.TrackCluster(ruleKey, req.ClusterName)
-			if !registry.Get(ruleKey).Ready {
+			if state := registry.Get(ruleKey); state != nil && !state.IsReady() {
 				registry.MarkReady(ruleKey)
 			}
 
@@ -239,34 +239,33 @@ func (w *DependencyRuleWatcher) ensureWatcher(ctx context.Context, key string, r
 		IndexFields:  indexFields,
 	}
 
-	// Check again in case a concurrent reconcile raced us.
-	if w.Registry.Exists(key) {
-		mgrCancel()
-		return nil
+	// Register atomically; if a concurrent reconcile raced us, cancel the
+	// duplicate manager we just created.
+	if old := m.Registry.Register(key, state); old != nil {
+		old.Cancel()
 	}
-
-	w.Registry.Register(key, state)
 
 	return nil
 }
 
-// createExportManager creates a new apiexport provider and mcmanager for the
-// given APIExport reference. Returns the manager and a cancel function.
-func (w *DependencyRuleWatcher) createExportManager(ctx context.Context, ref v1alpha1.APIExportReference) (mcmanager.Manager, context.CancelFunc, error) {
+// startProviderManager creates a new multicluster manager backed by the given
+// APIExport's virtual workspace. The manager is started in a background
+// goroutine and the returned cancel function tears it down.
+func (m *RuleCacheManager) startProviderManager(ctx context.Context, ref v1alpha1.APIExportReference) (mcmanager.Manager, context.CancelFunc, error) {
 	logger := log.FromContext(ctx).WithValues("apiExport", ref.Name, "path", ref.Path)
 
-	cfg := rest.CopyConfig(w.BaseConfig)
+	cfg := rest.CopyConfig(m.BaseConfig)
 	cfg.Host += logicalcluster.NewPath(ref.Path).RequestPath()
 
 	provider, err := apiexport.New(cfg, ref.Name, apiexport.Options{
-		Scheme: w.Scheme,
+		Scheme: m.Scheme,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating apiexport provider: %w", err)
 	}
 
 	mgr, err := mcmanager.New(cfg, provider, manager.Options{
-		Scheme:                 w.Scheme,
+		Scheme:                 m.Scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
 	})
@@ -277,9 +276,9 @@ func (w *DependencyRuleWatcher) createExportManager(ctx context.Context, ref v1a
 	mgrCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
-		logger.Info("starting dynamic manager for APIExport")
+		logger.Info("starting provider manager for APIExport")
 		if err := mgr.Start(mgrCtx); err != nil {
-			logger.Error(err, "dynamic manager failed")
+			logger.Error(err, "provider manager failed")
 		}
 	}()
 

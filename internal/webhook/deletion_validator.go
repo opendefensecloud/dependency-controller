@@ -40,8 +40,8 @@ func ReadyzCheck(initialized <-chan struct{}) func(*http.Request) error {
 // DeletionValidator is a validating admission webhook handler that blocks
 // deletion of resources that have active dependents referencing them.
 //
-// It queries indexed caches maintained by the DependencyRuleWatcher's
-// per-rule multicluster managers. No Dependency marker objects are needed.
+// It queries indexed caches maintained by the RuleCacheManager's per-rule
+// multicluster managers. No Dependency marker objects are needed.
 type DeletionValidator struct {
 	Registry *RuleRegistry
 
@@ -102,7 +102,7 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 	// Query each matching rule's indexed cache for dependents referencing this resource.
 	var blockers []string
 	for _, entry := range entries {
-		if !entry.State.Ready {
+		if !entry.State.IsReady() {
 			msg := fmt.Sprintf("dependency check unavailable for rule %s: cache warming up, retry later", entry.Key)
 			logger.Info(msg)
 
