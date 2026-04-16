@@ -182,6 +182,7 @@ graph LR
    webhook to quickly find dependents referencing a given resource.
 
 For detailed architecture documentation, see [docs/architecture.md](docs/architecture.md).
+For a step-by-step deployment walkthrough, see [docs/getting-started.md](docs/getting-started.md).
 
 ### RBAC Model
 
