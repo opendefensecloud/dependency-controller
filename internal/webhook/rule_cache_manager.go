@@ -6,8 +6,6 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
-
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
@@ -20,19 +18,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"k8s.io/utils/ptr"
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
+	mccontroller "sigs.k8s.io/multicluster-runtime/pkg/controller"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 	"go.opendefense.cloud/dependency-controller/internal/fieldpath"
 )
-
-// controllerSeq provides unique suffixes for per-rule controller names.
-// controller-runtime's global name registry has no unregister API, so
-// ephemeral per-rule managers that are recreated after a DependencyRule
-// delete/recreate cycle would collide on the same name without this.
-var controllerSeq atomic.Int64
 
 // RuleCacheManager reconciles DependencyRule objects and manages a dedicated
 // indexed cache per rule. Each rule's dependent resource type (e.g., VirtualMachine)
@@ -224,7 +218,8 @@ func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, rule *v1
 	registry := m.Registry
 	ruleKey := key
 	if err := mcbuilder.ControllerManagedBy(mgr).
-		Named(fmt.Sprintf("dep-index-%s-%d", key, controllerSeq.Add(1))).
+		Named(fmt.Sprintf("dep-index-%s", key)).
+		WithOptions(mccontroller.Options{SkipNameValidation: ptr.To(true)}).
 		For(watchObj).
 		Complete(mcreconcile.Func(func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 			registry.TrackCluster(ruleKey, req.ClusterName)

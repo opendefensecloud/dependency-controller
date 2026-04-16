@@ -39,8 +39,8 @@ graph LR
         NPWebhook["ValidatingWebhook"]
     end
 
-    subgraph SM["system:master"]
-        SMROLE["ClusterRole:<br/>dependency-controller<br/><i>(grants webhook read access)</i>"]
+    subgraph ROOT["Root Workspace"]
+        ROOTROLE["ClusterRole:<br/>dependency-controller-webhook<br/><i>(workspaces/content access)</i>"]
     end
 
     subgraph CW["Consumer WS"]
@@ -55,7 +55,7 @@ graph LR
     style DC fill:#dbeafe,color:#1e3a5f
     style CP fill:#e1f0da,color:#1a3e12
     style NP fill:#e1f0da,color:#1a3e12
-    style SM fill:#f3e8ff,color:#4a1d7a
+    style ROOT fill:#f3e8ff,color:#4a1d7a
     style CW fill:#fef3c7,color:#664d03
 ```
 
@@ -70,9 +70,9 @@ objects that declare how their resources reference other providers' resources.
 **Consumer workspaces** -- bind to provider exports and create the actual
 resources (VPCs, VMs). Consumers don't interact with the dependency system directly.
 
-**system:master** -- hosts a `ClusterRole` granting the webhook server read access
-to dependent resource types across all workspaces. Dynamically updated by the
-controller as rules change.
+**Root workspace** -- hosts a static `ClusterRole` granting the webhook server
+`workspaces/content` access, which is needed to enter child workspaces through
+APIExport virtual workspace endpoints. This is a deployment prerequisite.
 
 ## Component Overview
 
@@ -81,7 +81,7 @@ flowchart TD
     subgraph Controller["Controller Binary (cmd/controller)"]
         DR["DependencyRule Reconciler"]
         DR -->|delegates to| WI["Webhook Installer"]
-        DR -->|updates| RBAC["RBAC Manager<br/><i>ClusterRole for webhook in system:master</i>"]
+        DR -->|updates| RBAC["RBAC Manager<br/><i>apiexports/content per provider WS</i>"]
     end
 
     subgraph Webhook["Webhook Server Binary (cmd/webhook)"]
@@ -143,19 +143,34 @@ workspace, the webhook is deleted entirely.
 
 #### 2. RBAC Management
 
-The [`RBACManager`](../internal/controller/rbac_manager.go) maintains a
-`ClusterRole` and `ClusterRoleBinding` in `system:master` granting the webhook
-server `get`/`list`/`watch` on all dependent resource types. The webhook needs
-these permissions to watch dependent resources via provider APIExport virtual
-workspaces and build its indexed caches.
+The [`RBACManager`](../internal/controller/rbac_manager.go) dynamically manages
+`ClusterRole` and `ClusterRoleBinding` objects in provider workspaces, granting
+the webhook server access to APIExport virtual workspaces.
 
-Each reconcile calls `TrackRule(key, gvr)` with the rule's dependent GVR, then
-`Reconcile(ctx)` which builds the ClusterRole from all tracked GVRs.
-[`buildPolicyRules`](../internal/controller/rbac_manager.go) groups resources by
-API group for compact rules. On rule deletion, `RemoveRule(key)` is called first.
+In kcp, access to an APIExport's virtual workspace is controlled by the
+`apiexports/content` subresource in the workspace where the APIExport is defined.
+The webhook needs this access to watch dependent resources across consumer
+workspaces.
 
-The `ClusterRoleBinding` is created once and is idempotent on subsequent reconciles
-([`ensureClusterRoleBinding`](../internal/controller/rbac_manager.go)).
+Each reconcile calls `TrackRule(key, ref)` with the rule's
+[`ExportRef`](../internal/controller/rbac_manager.go) (workspace path + APIExport
+name), then `Reconcile(ctx)` which:
+
+1. Groups tracked rules by workspace path
+2. For each workspace, builds a `ClusterRole` granting `get`/`list`/`watch` on
+   `apiexports/content` scoped to specific APIExport names, plus
+   `apiexportendpointslices` for VW URL discovery
+3. Creates or updates the `ClusterRole` and ensures a `ClusterRoleBinding` exists
+
+On rule deletion, `RemoveRule(key)` returns the affected workspace path. The
+reconciler then passes it as an extra workspace to `Reconcile(ctx, wsPath)` to
+ensure cleanup. If no rules remain for a workspace, the `ClusterRole` and
+`ClusterRoleBinding` are deleted.
+
+**Prerequisites:** The webhook service account must have `workspaces/content`
+access in the root workspace to enter child workspaces through VW endpoints.
+This is a static grant applied at deployment time
+([`test/fixtures/root-rbac-bootstrap.yaml`](../test/fixtures/root-rbac-bootstrap.yaml)).
 
 ---
 

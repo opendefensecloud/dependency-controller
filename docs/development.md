@@ -136,7 +136,20 @@ kubectl apply -k config/kcp/
 This creates the `APIResourceSchema` objects and the
 `dependencies.opendefense.cloud` APIExport.
 
-### 2. Run the controller
+### 2. Apply bootstrap RBAC in root workspace
+
+The webhook service account needs `workspaces/content` access in the root workspace.
+Apply this once with a privileged identity:
+
+```sh
+kubectl ws root
+kubectl apply -f test/fixtures/root-rbac-bootstrap.yaml
+```
+
+Adjust the service account name in the `ClusterRoleBinding` subject to match your
+deployment's webhook service account (default: `system:serviceaccount:dependency-system:dependency-webhook`).
+
+### 3. Run the controller
 
 ```sh
 bin/dependency-controller \
@@ -144,10 +157,14 @@ bin/dependency-controller \
   --kcp-base-host=https://kcp.example.com:6443 \
   --webhook-url=https://dependency-webhook.ns.svc:443/validate \
   --webhook-ca-bundle-path=/path/to/ca.pem \
-  --root-shard-host=https://root-shard:6443
+  --webhook-service-account-name=dependency-webhook \
+  --webhook-service-account-namespace=dependency-system
 ```
 
-### 3. Run the webhook server
+The controller will dynamically create `apiexports/content` RBAC in each provider
+workspace as `DependencyRule` objects are created.
+
+### 4. Run the webhook server
 
 ```sh
 bin/dependency-webhook \
@@ -157,7 +174,7 @@ bin/dependency-webhook \
   --webhook-port=9443
 ```
 
-### 4. Provider setup
+### 5. Provider setup
 
 Each API provider that wants deletion protection:
 
@@ -166,6 +183,7 @@ Each API provider that wants deletion protection:
    other resources
 
 The controller then automatically installs a `ValidatingWebhookConfiguration`
-in each dependency provider's workspace and updates the RBAC ClusterRole in
-`system:master`. The webhook server picks up the rule, starts an indexed cache
-for the dependent resource type, and begins serving admission requests.
+in each dependency provider's workspace and creates `apiexports/content` RBAC in
+the dependent's provider workspace. The webhook server picks up the rule, starts
+an indexed cache for the dependent resource type, and begins serving admission
+requests.
