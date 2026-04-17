@@ -75,7 +75,7 @@ func (m *RuleCacheManager) PopulateRegistry(ctx context.Context) error {
 		rule := &ruleList.Items[i]
 		clusterName := logicalcluster.From(rule)
 		key := ruleStateKey(clusterName.String(), rule.Name)
-		if err := m.ensureCache(ctx, key, rule); err != nil {
+		if err := m.ensureCache(ctx, key, clusterName.String(), rule); err != nil {
 			return fmt.Errorf("populating rule %s/%s: %w", clusterName, rule.Name, err)
 		}
 	}
@@ -147,7 +147,7 @@ func (m *RuleCacheManager) Reconcile(ctx context.Context, req mcreconcile.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := m.ensureCache(ctx, key, &rule); err != nil {
+	if err := m.ensureCache(ctx, key, req.ClusterName, &rule); err != nil {
 		logger.Error(err, "failed to ensure cache for rule")
 		return ctrl.Result{}, err
 	}
@@ -159,15 +159,14 @@ func (m *RuleCacheManager) Reconcile(ctx context.Context, req mcreconcile.Reques
 // type, registers field indices for each dependency target, and stores the
 // resulting cache state in the registry. If a cache already exists for the
 // given key this is a no-op.
-func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, rule *v1alpha1.DependencyRule) error {
+func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, clusterName string, rule *v1alpha1.DependencyRule) error {
 	if m.Registry.Exists(key) {
 		return nil
 	}
 
-	ref := rule.Spec.Dependent.APIExportRef
 	dep := rule.Spec.Dependent
 
-	mgr, mgrCancel, err := m.startProviderManager(ctx, ref)
+	mgr, mgrCancel, err := m.startProviderManager(ctx, clusterName, dep.APIExportName)
 	if err != nil {
 		return fmt.Errorf("creating manager for rule %s: %w", rule.Name, err)
 	}
@@ -253,13 +252,13 @@ func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, rule *v1
 // startProviderManager creates a new multicluster manager backed by the given
 // APIExport's virtual workspace. The manager is started in a background
 // goroutine and the returned cancel function tears it down.
-func (m *RuleCacheManager) startProviderManager(ctx context.Context, ref v1alpha1.APIExportReference) (mcmanager.Manager, context.CancelFunc, error) {
-	logger := log.FromContext(ctx).WithValues("apiExport", ref.Name, "path", ref.Path)
+func (m *RuleCacheManager) startProviderManager(ctx context.Context, clusterName string, apiExportName string) (mcmanager.Manager, context.CancelFunc, error) {
+	logger := log.FromContext(ctx).WithValues("apiExport", apiExportName, "cluster", clusterName)
 
 	cfg := rest.CopyConfig(m.BaseConfig)
-	cfg.Host += logicalcluster.NewPath(ref.Path).RequestPath()
+	cfg.Host += logicalcluster.NewPath(clusterName).RequestPath()
 
-	provider, err := apiexport.New(cfg, ref.Name, apiexport.Options{
+	provider, err := apiexport.New(cfg, apiExportName, apiexport.Options{
 		Scheme: m.Scheme,
 	})
 	if err != nil {

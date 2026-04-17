@@ -99,21 +99,12 @@ spec:
                 description: Dependent identifies the resource type that holds references
                   to other resources.
                 properties:
-                  apiExportRef:
-                    description: APIExportRef references the APIExport that provides
-                      this resource type.
-                    properties:
-                      name:
-                        description: Name is the name of the APIExport.
-                        type: string
-                      path:
-                        description: Path is the workspace path where the APIExport
-                          lives (e.g., "root:compute-provider").
-                        type: string
-                    required:
-                    - name
-                    - path
-                    type: object
+                  apiExportName:
+                    description: |-
+                      APIExportName is the name of the APIExport that provides this resource type.
+                      The APIExport must be in the same workspace as the DependencyRule — the
+                      workspace path is derived from the rule's location, not specified here.
+                    type: string
                   group:
                     description: Group is the API group of the dependent resource.
                     type: string
@@ -128,7 +119,7 @@ spec:
                     description: Version is the API version of the dependent resource.
                     type: string
                 required:
-                - apiExportRef
+                - apiExportName
                 - group
                 - kind
                 - resource

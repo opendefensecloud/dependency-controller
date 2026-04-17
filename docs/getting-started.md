@@ -413,9 +413,7 @@ metadata:
   name: vm-dependencies
 spec:
   dependent:
-    apiExportRef:
-      path: root:compute-provider
-      name: compute.test.io
+    apiExportName: compute.test.io
     group: compute.test.io
     version: v1
     kind: VirtualMachine

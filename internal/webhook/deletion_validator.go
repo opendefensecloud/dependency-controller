@@ -117,12 +117,14 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		}
 
 		// Query the field index for dependents referencing the deleted resource name.
+		// Scoped to the same namespace — cross-namespace references are not supported.
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(entry.State.DependentGVK.GroupVersion().WithKind(entry.State.DependentGVK.Kind + "List"))
 
-		err = cluster.GetCache().List(ctx, list, client.MatchingFields{
-			entry.MatchedField.FieldPath: req.Name,
-		})
+		err = cluster.GetCache().List(ctx, list,
+			client.MatchingFields{entry.MatchedField.FieldPath: req.Name},
+			client.InNamespace(req.Namespace),
+		)
 		if err != nil {
 			logger.Error(err, "failed to query indexed cache", "rule", entry.Key)
 			return admission.Errored(http.StatusInternalServerError, fmt.Errorf("failed to check dependencies for rule %s: %w", entry.Key, err))

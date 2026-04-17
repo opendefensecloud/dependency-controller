@@ -50,9 +50,7 @@ metadata:
   name: vm-dependencies
 spec:
   dependent:
-    apiExportRef:
-      path: root:compute-provider
-      name: compute.example.com
+    apiExportName: compute.example.com
     group: compute.example.com
     version: v1alpha1
     kind: VirtualMachine

@@ -314,9 +314,7 @@ metadata:
   name: vm-dependencies
 spec:
   dependent:
-    apiExportRef:
-      path: "root:compute-provider"
-      name: "compute.test.io"
+    apiExportName: "compute.test.io"
     group: compute.test.io
     version: v1
     kind: VirtualMachine
@@ -333,7 +331,7 @@ spec:
 ```
 
 `spec.dependent` -- the resource type that holds references (the one being cached).
-`spec.dependent.apiExportRef` -- where to find this type's virtual workspace.
+`spec.dependent.apiExportName` -- the APIExport in the same workspace that provides this type.
 `spec.dependencies[]` -- the resource types being referenced (the ones being protected).
 `spec.dependencies[].fieldRef.path` -- where in the dependent resource the reference lives.
 

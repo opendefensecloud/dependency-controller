@@ -30,9 +30,12 @@ type DependencyRuleSpec struct {
 }
 
 // DependentRef identifies the dependent resource type and its APIExport.
+// The APIExport must be in the same workspace as the DependencyRule.
 type DependentRef struct {
-	// APIExportRef references the APIExport that provides this resource type.
-	APIExportRef APIExportReference `json:"apiExportRef"`
+	// APIExportName is the name of the APIExport that provides this resource type.
+	// The APIExport must be in the same workspace as the DependencyRule — the
+	// workspace path is derived from the rule's location, not specified here.
+	APIExportName string `json:"apiExportName"`
 
 	// Group is the API group of the dependent resource.
 	Group string `json:"group"`
