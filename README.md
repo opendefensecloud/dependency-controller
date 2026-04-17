@@ -1,5 +1,8 @@
 # KCP-aware Dependency Controller
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/opendefensecloud/dependency-controller/badge)](https://scorecard.dev/viewer/?uri=github.com/opendefensecloud/dependency-controller)
+[![GitHub Release](https://img.shields.io/github/v/release/opendefensecloud/dependency-controller)](https://github.com/opendefensecloud/dependency-controller/releases/latest)
+
 ## Problem Statement
 
 In KCP, APIs can be offered to users via APIExports by a multitude of providers.
