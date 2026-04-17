@@ -1,0 +1,62 @@
+name: Golang CI
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.go"
+      - ".github/workflows/golang.yaml"
+      - "flake.nix"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.go"
+      - ".github/workflows/golang.yaml"
+      - "flake.nix"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    outputs:
+      go-version: ${{ steps.get-go-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: get-go-version
+        id: get-go-version
+        run: |
+          GO_VERSION="$(sed -nE 's/^[[:space:]]*goVersion[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)";[[:space:]]*$/\1/p' flake.nix)"
+          if [ "$(printf '%s\n' "$GO_VERSION" | sed '/^$/d' | wc -l)" -ne 1 ]; then
+            echo "::error::Expected exactly one goVersion assignment in flake.nix"
+            exit 1
+          fi
+          echo "version=$GO_VERSION" >> $GITHUB_OUTPUT
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.get-go-version.outputs.version }}
+      - name: lint-license
+        run: make lint-no-golangci
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.lint.outputs.go-version }}
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: make test

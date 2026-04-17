@@ -1,23 +1,45 @@
-FROM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.2 AS builder
 
 WORKDIR /workspace
+RUN go env -w GOMODCACHE=/root/.cache/go-build
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/root/.cache/go-build go mod download
 
 COPY api/ api/
 COPY cmd/ cmd/
 COPY internal/ internal/
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/dependency-controller ./cmd/controller/
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/dependency-webhook ./cmd/webhook/
+RUN mkdir bin
 
+FROM builder AS controller-builder
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o bin/dependency-controller ./cmd/controller/
+
+FROM builder AS webhook-builder
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o bin/dependency-webhook ./cmd/webhook/
+
+FROM gcr.io/distroless/static:nonroot AS controller
+WORKDIR /
+COPY --from=controller-builder /workspace/bin/dependency-controller .
+USER 65532:65532
+ENTRYPOINT ["/dependency-controller"]
+
+FROM gcr.io/distroless/static:nonroot AS webhook
+WORKDIR /
+COPY --from=webhook-builder /workspace/bin/dependency-webhook .
+USER 65532:65532
+ENTRYPOINT ["/dependency-webhook"]
+
+# Combined image with both binaries (used by e2e tests and single-image deployments).
 FROM gcr.io/distroless/static:nonroot
-
-COPY --from=builder /out/dependency-controller /dependency-controller
-COPY --from=builder /out/dependency-webhook /dependency-webhook
-
+WORKDIR /
+COPY --from=controller-builder /workspace/bin/dependency-controller .
+COPY --from=webhook-builder /workspace/bin/dependency-webhook .
 USER 65532:65532

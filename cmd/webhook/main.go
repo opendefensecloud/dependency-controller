@@ -1,4 +1,4 @@
-// Copyright 2026 Open Defense and dependency-controller contributors
+// Copyright 2026 BWI GmbH and Dependency Controller contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package main

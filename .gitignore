@@ -1,4 +1,7 @@
 /.devenv/
+/.direnv/
+/.pre-commit-config.yaml
 /bin/
+/result
 *.tgz
 /coverprofile

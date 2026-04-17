@@ -66,7 +66,7 @@ manifests: controller-gen apigen ## Generate CRDs and convert to kcp APIResource
 
 .PHONY: fmt
 fmt: addlicense golangci-lint ## Add license headers and format code.
-	find . -not -path '*/.*' -not -path '*/bin/*' -name '*.go' -exec $(ADDLICENSE) -c 'Open Defense and dependency-controller contributors' -l apache -s=only {} +
+	find . -not -path '*/.*' -not -path '*/bin/*' -name '*.go' -exec $(ADDLICENSE) -c 'BWI GmbH and Dependency Controller contributors' -l apache -s=only {} +
 	$(GO) fmt ./...
 	$(GOLANGCI_LINT) run --fix
 
@@ -77,12 +77,20 @@ mod: ## Run go mod tidy, download, verify.
 	@$(GO) mod verify
 
 .PHONY: lint
-lint: golangci-lint ## Run linters.
+lint: golangci-lint ## Run all linters.
 	$(GOLANGCI_LINT) run -v
+
+.PHONY: lint-no-golangci
+lint-no-golangci: addlicense ## Run linters except golangci-lint (license headers + shellcheck).
+	find . -not -path '*/.*' -not -path '*/bin/*' -name '*.go' -exec $(ADDLICENSE) -c 'BWI GmbH and Dependency Controller contributors' -l apache -s=only -check {} +
 
 .PHONY: vet
 vet: ## Run go vet.
 	$(GO) vet ./...
+
+.PHONY: scan
+scan: ## Run OSV vulnerability scanner.
+	osv-scanner --include-git-root --config ./.osv-scanner.toml -r ./
 
 ##@ Build
 
