@@ -70,7 +70,7 @@ webhook:
 
     # Use cert-manager to issue a TLS certificate.
     certManager:
-      enabled: true
+      enabled: false
       # issuerRef is required when certManager is enabled.
       issuerRef:
         name: ""
