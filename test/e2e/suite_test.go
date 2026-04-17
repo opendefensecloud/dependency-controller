@@ -438,11 +438,13 @@ func buildComponentKubeconfigs() {
 	waitFor(time.Minute, "controller cert issued", func() error {
 		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-controller-cert",
 			"-o", "jsonpath={.data.tls\\.crt}")
+
 		return err
 	})
 	waitFor(time.Minute, "webhook SA cert issued", func() error {
 		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-webhook-sa-cert",
 			"-o", "jsonpath={.data.tls\\.crt}")
+
 		return err
 	})
 
@@ -505,6 +507,7 @@ func bootstrapRBAC() {
 	waitFor(time.Minute, "bootstrap cert issued", func() error {
 		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-bootstrap-cert",
 			"-o", "jsonpath={.data.tls\\.crt}")
+
 		return err
 	})
 

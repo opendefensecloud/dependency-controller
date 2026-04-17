@@ -6,6 +6,7 @@ package webhook
 import (
 	"context"
 	"fmt"
+
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
@@ -18,7 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"k8s.io/utils/ptr"
 	mcbuilder "sigs.k8s.io/multicluster-runtime/pkg/builder"
 	mccontroller "sigs.k8s.io/multicluster-runtime/pkg/controller"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
@@ -219,7 +219,7 @@ func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, rule *v1
 	ruleKey := key
 	if err := mcbuilder.ControllerManagedBy(mgr).
 		Named(fmt.Sprintf("dep-index-%s", key)).
-		WithOptions(mccontroller.Options{SkipNameValidation: ptr.To(true)}).
+		WithOptions(mccontroller.Options{SkipNameValidation: new(true)}).
 		For(watchObj).
 		Complete(mcreconcile.Func(func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 			registry.TrackCluster(ruleKey, req.ClusterName)

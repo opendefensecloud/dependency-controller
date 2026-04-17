@@ -156,6 +156,7 @@ func (r *DependencyRuleReconciler) ensureWebhooks(ctx context.Context, ruleKey s
 	}
 
 	r.WebhookInstaller.BaseConfig = r.vwBaseCfg
+
 	return r.WebhookInstaller.EnsureWebhooks(ctx, ruleKey, resolvedRule)
 }
 

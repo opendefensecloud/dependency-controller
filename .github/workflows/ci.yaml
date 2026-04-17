@@ -25,8 +25,8 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Unit tests
-        run: go test ./internal/... ./api/... -cover
+      - name: Test
+        run: make test
 
   lint:
     runs-on: ubuntu-latest

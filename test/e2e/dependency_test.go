@@ -54,6 +54,7 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			if !allowed {
 				return fmt.Errorf("webhook SA does not yet have apiexports/content on compute.test.io")
 			}
+
 			return nil
 		})
 
