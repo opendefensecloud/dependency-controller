@@ -28,7 +28,7 @@ jobs:
     outputs:
       go-version: ${{ steps.get-go-version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: get-go-version
         id: get-go-version
         run: |
@@ -50,7 +50,7 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.lint.outputs.go-version }}
