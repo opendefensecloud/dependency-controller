@@ -113,7 +113,7 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 		return ctrl.Result{}, err
 	}
 
-	ruleKey := req.ClusterName + "/" + req.Name
+	ruleKey := string(req.ClusterName) + "/" + req.Name
 
 	var rule v1alpha1.DependencyRule
 	if err := cl.GetClient().Get(ctx, client.ObjectKey{Name: req.Name}, &rule); err != nil {

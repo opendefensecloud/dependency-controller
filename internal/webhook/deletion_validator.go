@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
 )
 
 const (
@@ -109,7 +110,7 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 			return admission.Denied(msg)
 		}
 
-		cluster, err := entry.State.Manager.GetCluster(ctx, clusterName.String())
+		cluster, err := entry.State.Manager.GetCluster(ctx, multicluster.ClusterName(clusterName.String()))
 		if err != nil {
 			// Cluster not known to this rule's manager — no dependents here.
 			logger.V(1).Info("cluster not found in rule manager, skipping", "rule", entry.Key, "cluster", clusterName)
