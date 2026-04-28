@@ -57,7 +57,6 @@ spec:
     group: compute.example.com
     version: v1alpha1
     kind: VirtualMachine
-    resource: virtualmachines
   dependencies:
     - group: network.example.com
       version: v1alpha1
