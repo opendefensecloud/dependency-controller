@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260417-d9d5975.dependencyrules.dependencies.opendefense.cloud
+  name: v260427-a7580fe.dependencyrules.dependencies.opendefense.cloud
 spec:
   group: dependencies.opendefense.cloud
   names:
@@ -52,10 +52,16 @@ spec:
                     properties:
                       name:
                         description: Name is the name of the APIExport.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?(\.[a-z]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                       path:
                         description: Path is the workspace path where the APIExport
                           lives (e.g., "root:compute-provider").
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z][a-z0-9-]*(:[a-z][a-z0-9-]*)*$
                         type: string
                     required:
                     - name
@@ -68,19 +74,32 @@ spec:
                       path:
                         description: |-
                           Path is a dot-notation path in the dependent resource pointing to the dependency's name.
-                          For example, ".spec.vpcRef.name".
+                          For example, ".spec.vpcRef.name". The leading dot is optional. Array indexing
+                          and wildcards are not supported.
+                        maxLength: 253
+                        minLength: 2
+                        pattern: ^\.?[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)+$
                         type: string
                     required:
                     - path
                     type: object
                   group:
                     description: Group is the API group of the dependency resource.
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?(\.[a-z]([-a-z0-9]*[a-z0-9])?)*$
                     type: string
                   resource:
                     description: Resource is the plural resource name (e.g., "vpcs").
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z][a-z0-9]*$
                     type: string
                   version:
                     description: Version is the API version of the dependency resource.
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^v[1-9][0-9]*([a-z]+[1-9][0-9]*)?$
                     type: string
                 required:
                 - apiExportRef
@@ -99,18 +118,33 @@ spec:
                     APIExportName is the name of the APIExport that provides this resource type.
                     The APIExport must be in the same workspace as the DependencyRule — the
                     workspace path is derived from the rule's location, not specified here.
+                  maxLength: 253
+                  minLength: 1
+                  pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?(\.[a-z]([-a-z0-9]*[a-z0-9])?)*$
                   type: string
                 group:
                   description: Group is the API group of the dependent resource.
+                  maxLength: 253
+                  minLength: 1
+                  pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?(\.[a-z]([-a-z0-9]*[a-z0-9])?)*$
                   type: string
                 kind:
                   description: Kind is the kind of the dependent resource (e.g., "VirtualMachine").
+                  maxLength: 63
+                  minLength: 1
+                  pattern: ^[A-Z][A-Za-z0-9]*$
                   type: string
                 resource:
                   description: Resource is the plural resource name (e.g., "virtualmachines").
+                  maxLength: 63
+                  minLength: 1
+                  pattern: ^[a-z][a-z0-9]*$
                   type: string
                 version:
                   description: Version is the API version of the dependent resource.
+                  maxLength: 63
+                  minLength: 1
+                  pattern: ^v[1-9][0-9]*([a-z]+[1-9][0-9]*)?$
                   type: string
               required:
               - apiExportName
