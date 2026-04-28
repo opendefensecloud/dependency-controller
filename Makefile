@@ -1,5 +1,5 @@
 # Include ODC common make targets
-DEV_KIT_VERSION := v1.0.2
+DEV_KIT_VERSION := v1.0.4
 -include common.mk
 common.mk:
 	curl --fail -sSL https://raw.githubusercontent.com/opendefensecloud/dev-kit/$(DEV_KIT_VERSION)/common.mk -o common.mk.download && \
@@ -19,6 +19,9 @@ TIMESTAMP := $(shell date '+%Y%m%d%H%M%S')
 DEV_TAG ?= dev.$(TIMESTAMP)
 export DEV_TAG
 
+LICENSE := apache
+LICENSE_COMMENT := BWI GmbH and Dependency Controller contributors
+
 ##@ Development
 
 .PHONY: generate
@@ -35,7 +38,7 @@ manifests: $(CONTROLLER_GEN) $(APIGEN) ## Generate CRDs and convert to kcp APIRe
 
 .PHONY: fmt
 fmt: $(ADDLICENSE) $(GOLANGCI_LINT) ## Add license headers and format code.
-	git ls-files | grep '.*\.go$$' | xargs $(ADDLICENSE) -c 'BWI GmbH and Dependency Controller contributors' -l apache -s=only
+	$(MAKE) addlicense license=$(LICENSE) comment='$(LICENSE_COMMENT)' pattern='*\.go'
 	$(GO) fmt ./...
 	$(GOLANGCI_LINT) run --fix
 
@@ -43,8 +46,8 @@ fmt: $(ADDLICENSE) $(GOLANGCI_LINT) ## Add license headers and format code.
 lint: lint-no-golangci golangci-lint ## Run all linters.
 
 .PHONY: lint-no-golangci
-lint-no-golangci: $(ADDLICENSE) ## Run linters except golangci-lint (license headers + shellcheck).
-	git ls-files | grep '.*\.go$$' | xargs $(ADDLICENSE) -c 'BWI GmbH and Dependency Controller contributors' -l apache -s=only -check
+lint-no-golangci: ## Run linters except golangci-lint (license headers + shellcheck).
+	$(MAKE) addlicense-check license=$(LICENSE) comment='$(LICENSE_COMMENT)' pattern='*\.go'
 
 .PHONY: vet
 vet: ## Run go vet.
