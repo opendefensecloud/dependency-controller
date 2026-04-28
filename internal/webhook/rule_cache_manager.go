@@ -9,7 +9,6 @@ import (
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/multicluster-provider/apiexport"
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -26,6 +25,7 @@ import (
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 	"go.opendefense.cloud/dependency-controller/internal/fieldpath"
+	"go.opendefense.cloud/dependency-controller/internal/kcp"
 )
 
 // RuleCacheManager reconciles DependencyRule objects and manages a dedicated
@@ -98,13 +98,13 @@ func (m *RuleCacheManager) virtualWorkspaceClient(ctx context.Context) (client.C
 		return nil, fmt.Errorf("creating direct client: %w", err)
 	}
 
-	var ess apisv1alpha1.APIExportEndpointSlice
-	if err := directClient.Get(ctx, client.ObjectKey{Name: m.APIExportName}, &ess); err != nil {
-		return nil, fmt.Errorf("getting APIExportEndpointSlice %s: %w", m.APIExportName, err)
+	ess, err := kcp.FindEndpointSlice(ctx, directClient, m.APIExportName)
+	if err != nil {
+		return nil, fmt.Errorf("resolving APIExportEndpointSlice for %s: %w", m.APIExportName, err)
 	}
 
 	if len(ess.Status.APIExportEndpoints) == 0 {
-		return nil, fmt.Errorf("APIExportEndpointSlice %s has no endpoints", m.APIExportName)
+		return nil, fmt.Errorf("APIExportEndpointSlice %s has no endpoints", ess.Name)
 	}
 
 	vwURL := ess.Status.APIExportEndpoints[0].URL
@@ -259,7 +259,18 @@ func (m *RuleCacheManager) startProviderManager(ctx context.Context, clusterName
 	cfg := rest.CopyConfig(m.BaseConfig)
 	cfg.Host += logicalcluster.NewPath(clusterName).RequestPath()
 
-	provider, err := apiexport.New(cfg, apiExportName, apiexport.Options{
+	// Resolve the APIExportEndpointSlice name — it may differ from the APIExport name.
+	wsClient, err := client.New(cfg, client.Options{Scheme: m.Scheme})
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating client for endpoint slice discovery: %w", err)
+	}
+
+	ess, err := kcp.FindEndpointSlice(ctx, wsClient, apiExportName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving APIExportEndpointSlice for %s: %w", apiExportName, err)
+	}
+
+	provider, err := apiexport.New(cfg, ess.Name, apiexport.Options{
 		Scheme: m.Scheme,
 	})
 	if err != nil {
