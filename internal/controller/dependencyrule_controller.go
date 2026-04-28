@@ -148,20 +148,25 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 
 // ensureWebhooks installs webhooks in dependency provider workspaces via the VW.
 func (r *DependencyRuleReconciler) ensureWebhooks(ctx context.Context, ruleKey string, rule *v1alpha1.DependencyRule) error {
-	// Replace workspace paths with logical cluster names for the installer.
-	resolvedRule := rule.DeepCopy()
-	for i := range resolvedRule.Spec.Dependencies {
-		wsPath := resolvedRule.Spec.Dependencies[i].APIExportRef.Path
+	// Build a mapping from workspace path to logical cluster name.
+	clusterNames := make(map[string]string, len(rule.Spec.Dependencies))
+	for _, dep := range rule.Spec.Dependencies {
+		wsPath := dep.APIExportRef.Path
+		if _, ok := clusterNames[wsPath]; ok {
+			continue
+		}
+
 		clusterName, err := r.wsResolver.resolve(wsPath)
 		if err != nil {
 			return fmt.Errorf("resolving %s: %w", wsPath, err)
 		}
-		resolvedRule.Spec.Dependencies[i].APIExportRef.Path = clusterName
+
+		clusterNames[wsPath] = clusterName
 	}
 
 	r.WebhookInstaller.BaseConfig = r.vwBaseCfg
 
-	return r.WebhookInstaller.EnsureWebhooks(ctx, ruleKey, resolvedRule)
+	return r.WebhookInstaller.EnsureWebhooks(ctx, ruleKey, rule, clusterNames)
 }
 
 // collectWorkspacePaths extracts dependency workspace paths referenced in a DependencyRule.
