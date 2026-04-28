@@ -114,7 +114,6 @@ func main() {
 
 	// Register the multicluster DependencyRule reconciler.
 	reconciler := controller.NewDependencyRuleReconciler(mgr)
-	reconciler.APIExportName = apiExportName
 	reconciler.BaseConfig = baseCfg
 
 	// Wire up webhook installer if configured.

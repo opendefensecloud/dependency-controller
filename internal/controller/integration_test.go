@@ -222,7 +222,6 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		webhookInstaller := controller.NewWebhookInstaller(kcpConfig, webhookURL, caBundle)
 
 		ruleReconciler := controller.NewDependencyRuleReconciler(mgr)
-		ruleReconciler.APIExportName = "dependencies.opendefense.cloud"
 		ruleReconciler.BaseConfig = kcpConfig
 		ruleReconciler.WebhookInstaller = webhookInstaller
 

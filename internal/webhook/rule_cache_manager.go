@@ -52,44 +52,47 @@ type RuleCacheManager struct {
 	Registry *RuleRegistry
 }
 
-// PopulateRegistry lists all existing DependencyRules from the APIExport virtual
-// workspace and ensures an indexed cache exists for each one. This must be called
-// after the manager has started (e.g., from a manager.Runnable) so that the
-// APIExportEndpointSlice is available.
+// PopulateRegistry lists all existing DependencyRules from every shard's
+// APIExport virtual workspace and ensures an indexed cache exists for each one.
+// This must be called after the manager has started (e.g., from a
+// manager.Runnable) so that the APIExportEndpointSlice is available.
 func (m *RuleCacheManager) PopulateRegistry(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("rule-cache-manager")
 
-	vwClient, err := m.virtualWorkspaceClient(ctx)
+	vwClients, err := m.virtualWorkspaceClients(ctx)
 	if err != nil {
-		return fmt.Errorf("creating virtual workspace client: %w", err)
+		return fmt.Errorf("creating virtual workspace clients: %w", err)
 	}
 
-	var ruleList v1alpha1.DependencyRuleList
-	if err := vwClient.List(ctx, &ruleList); err != nil {
-		return fmt.Errorf("listing initial DependencyRules: %w", err)
-	}
+	var totalRules int
+	for _, vwClient := range vwClients {
+		var ruleList v1alpha1.DependencyRuleList
+		if err := vwClient.List(ctx, &ruleList); err != nil {
+			return fmt.Errorf("listing initial DependencyRules: %w", err)
+		}
 
-	logger.Info("populating rule registry", "ruleCount", len(ruleList.Items))
+		totalRules += len(ruleList.Items)
 
-	for i := range ruleList.Items {
-		rule := &ruleList.Items[i]
-		clusterName := logicalcluster.From(rule)
-		key := ruleStateKey(clusterName.String(), rule.Name)
-		if err := m.ensureCache(ctx, key, clusterName.String(), rule); err != nil {
-			return fmt.Errorf("populating rule %s/%s: %w", clusterName, rule.Name, err)
+		for i := range ruleList.Items {
+			rule := &ruleList.Items[i]
+			clusterName := logicalcluster.From(rule)
+			key := ruleStateKey(clusterName.String(), rule.Name)
+			if err := m.ensureCache(ctx, key, clusterName.String(), rule); err != nil {
+				return fmt.Errorf("populating rule %s/%s: %w", clusterName, rule.Name, err)
+			}
 		}
 	}
 
-	logger.Info("rule registry populated")
+	logger.Info("rule registry populated", "ruleCount", totalRules, "shards", len(vwClients))
 
 	return nil
 }
 
-// virtualWorkspaceClient reads the APIExportEndpointSlice from the dep-ctrl
-// workspace to discover the virtual workspace URL, then returns a client
-// pointing at {vwURL}/clusters/* so it can list resources across all bound
-// workspaces.
-func (m *RuleCacheManager) virtualWorkspaceClient(ctx context.Context) (client.Client, error) {
+// virtualWorkspaceClients reads the APIExportEndpointSlice from the dep-ctrl
+// workspace to discover the virtual workspace URLs (one per kcp shard), then
+// returns a client per shard pointing at {vwURL}/clusters/* so it can list
+// resources across all bound workspaces on that shard.
+func (m *RuleCacheManager) virtualWorkspaceClients(ctx context.Context) ([]client.Client, error) {
 	// Use a direct (non-cached) client to read the APIExportEndpointSlice
 	// from the dep-ctrl workspace.
 	localCfg := m.DepCtrlManager.GetLocalManager().GetConfig()
@@ -107,19 +110,21 @@ func (m *RuleCacheManager) virtualWorkspaceClient(ctx context.Context) (client.C
 		return nil, fmt.Errorf("APIExportEndpointSlice %s has no endpoints", ess.Name)
 	}
 
-	vwURL := ess.Status.APIExportEndpoints[0].URL
+	// Create a client for each shard's virtual workspace URL.
+	var clients []client.Client
+	for _, ep := range ess.Status.APIExportEndpoints {
+		vwCfg := rest.CopyConfig(localCfg)
+		vwCfg.Host = ep.URL + "/clusters/*"
 
-	// Create a client for the wildcard cluster path to list across all
-	// logical clusters visible through the virtual workspace.
-	vwCfg := rest.CopyConfig(localCfg)
-	vwCfg.Host = vwURL + "/clusters/*"
+		vwClient, err := client.New(vwCfg, client.Options{Scheme: m.Scheme})
+		if err != nil {
+			return nil, fmt.Errorf("creating VW client for %s: %w", ep.URL, err)
+		}
 
-	vwClient, err := client.New(vwCfg, client.Options{Scheme: m.Scheme})
-	if err != nil {
-		return nil, fmt.Errorf("creating VW client: %w", err)
+		clients = append(clients, vwClient)
 	}
 
-	return vwClient, nil
+	return clients, nil
 }
 
 // Reconcile handles DependencyRule events. On creation/update it ensures an
