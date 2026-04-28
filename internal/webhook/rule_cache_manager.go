@@ -133,7 +133,8 @@ func (m *RuleCacheManager) Reconcile(ctx context.Context, req mcreconcile.Reques
 		return ctrl.Result{}, err
 	}
 
-	key := ruleStateKey(req.ClusterName, req.Name)
+	clusterName := string(req.ClusterName)
+	key := ruleStateKey(clusterName, req.Name)
 
 	var rule v1alpha1.DependencyRule
 	if err := cl.GetClient().Get(ctx, client.ObjectKey{Name: req.Name}, &rule); err != nil {
@@ -147,7 +148,7 @@ func (m *RuleCacheManager) Reconcile(ctx context.Context, req mcreconcile.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := m.ensureCache(ctx, key, req.ClusterName, &rule); err != nil {
+	if err := m.ensureCache(ctx, key, clusterName, &rule); err != nil {
 		logger.Error(err, "failed to ensure cache for rule")
 		return ctrl.Result{}, err
 	}
@@ -221,7 +222,7 @@ func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, clusterN
 		WithOptions(mccontroller.Options{SkipNameValidation: new(true)}).
 		For(watchObj).
 		Complete(mcreconcile.Func(func(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
-			registry.TrackCluster(ruleKey, req.ClusterName)
+			registry.TrackCluster(ruleKey, string(req.ClusterName))
 			if state := registry.Get(ruleKey); state != nil && !state.IsReady() {
 				registry.MarkReady(ruleKey)
 			}
