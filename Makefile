@@ -5,7 +5,7 @@ common.mk:
 	curl --fail -sSL https://raw.githubusercontent.com/opendefensecloud/dev-kit/$(DEV_KIT_VERSION)/common.mk -o common.mk.download && \
 	mv common.mk.download $@
 
-APIGEN ?= $(LOCAlGOBIN)/apigen
+APIGEN ?= $(LOCALGOBIN)/apigen
 
 KCP ?= $(LOCALBIN)/kcp
 KCP_VERSION ?= 0.30.0
