@@ -35,27 +35,48 @@ type DependentRef struct {
 	// APIExportName is the name of the APIExport that provides this resource type.
 	// The APIExport must be in the same workspace as the DependencyRule — the
 	// workspace path is derived from the rule's location, not specified here.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?(\.[a-z]([-a-z0-9]*[a-z0-9])?)*$`
 	APIExportName string `json:"apiExportName"`
 
 	// Group is the API group of the dependent resource.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?(\.[a-z]([-a-z0-9]*[a-z0-9])?)*$`
 	Group string `json:"group"`
 
 	// Version is the API version of the dependent resource.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^v[1-9][0-9]*([a-z]+[1-9][0-9]*)?$`
 	Version string `json:"version"`
 
 	// Kind is the kind of the dependent resource (e.g., "VirtualMachine").
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
 	Kind string `json:"kind"`
 
 	// Resource is the plural resource name (e.g., "virtualmachines").
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9]*$`
 	Resource string `json:"resource"`
 }
 
 // APIExportReference identifies an APIExport by workspace path and name.
 type APIExportReference struct {
 	// Path is the workspace path where the APIExport lives (e.g., "root:compute-provider").
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]*(:[a-z][a-z0-9-]*)*$`
 	Path string `json:"path"`
 
 	// Name is the name of the APIExport.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?(\.[a-z]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 }
 
@@ -66,12 +87,21 @@ type DependencyTarget struct {
 	APIExportRef APIExportReference `json:"apiExportRef"`
 
 	// Group is the API group of the dependency resource.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?(\.[a-z]([-a-z0-9]*[a-z0-9])?)*$`
 	Group string `json:"group"`
 
 	// Version is the API version of the dependency resource.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^v[1-9][0-9]*([a-z]+[1-9][0-9]*)?$`
 	Version string `json:"version"`
 
 	// Resource is the plural resource name (e.g., "vpcs").
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9]*$`
 	Resource string `json:"resource"`
 
 	// FieldRef describes where in the dependent resource the dependency is referenced.
@@ -81,7 +111,11 @@ type DependencyTarget struct {
 // FieldReference describes a field path in the dependent resource that points to the dependency.
 type FieldReference struct {
 	// Path is a dot-notation path in the dependent resource pointing to the dependency's name.
-	// For example, ".spec.vpcRef.name".
+	// For example, ".spec.vpcRef.name". The leading dot is optional. Array indexing
+	// and wildcards are not supported.
+	// +kubebuilder:validation:MinLength=2
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^\.?[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)+$`
 	Path string `json:"path"`
 }
 
