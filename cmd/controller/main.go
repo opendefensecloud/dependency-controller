@@ -126,7 +126,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		reconciler.WebhookInstaller = controller.NewWebhookInstaller(nil, webhookURL, caBundle)
+		reconciler.WebhookInstaller = controller.NewWebhookInstaller(mgr, webhookURL, caBundle)
 	}
 
 	if err := mcbuilder.ControllerManagedBy(mgr).

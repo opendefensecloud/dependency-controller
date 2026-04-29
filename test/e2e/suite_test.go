@@ -744,6 +744,7 @@ spec:
 		_, err := runNoFail(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
 			"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
 			"get", "--raw", "/readyz")
+
 		return err
 	})
 }
@@ -1182,4 +1183,3 @@ func applyToKind(manifest string) {
 	cmd.Stderr = &buf
 	Expect(cmd.Run()).To(Succeed(), "applying manifest: %s", buf.String())
 }
-

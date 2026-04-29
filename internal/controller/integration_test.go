@@ -219,7 +219,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Create the controller-side reconciler (webhook install only, no RBAC in envtest).
-		webhookInstaller := controller.NewWebhookInstaller(kcpConfig, webhookURL, caBundle)
+		webhookInstaller := controller.NewWebhookInstaller(mgr, webhookURL, caBundle)
 
 		ruleReconciler := controller.NewDependencyRuleReconciler(mgr)
 		ruleReconciler.BaseConfig = kcpConfig

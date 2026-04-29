@@ -133,10 +133,6 @@ func (r *DependencyRuleReconciler) ensureWebhooks(ctx context.Context, ruleKey s
 		clusterNames[wsPath] = clusterName
 	}
 
-	// Use the base kcp config (front-proxy URL) so webhook installation
-	// requests are routed to the correct shard for each workspace.
-	r.WebhookInstaller.BaseConfig = r.BaseConfig
-
 	return r.WebhookInstaller.EnsureWebhooks(ctx, ruleKey, rule, clusterNames)
 }
 
