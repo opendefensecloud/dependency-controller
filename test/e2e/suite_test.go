@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -287,10 +288,10 @@ func waitFor(timeout time.Duration, desc string, check func() error) {
 	}
 }
 
-// kindctlSecret extracts a field from a k8s secret in the given namespace.
-func kindctlSecret(namespace, name, jsonpath string) string {
+// kindctlSecret extracts the kubeconfig from a k8s secret in the kcp-system namespace.
+func kindctlSecret(name string) string {
 	GinkgoHelper()
-	return kindctl("-n", namespace, "get", "secret", name, "-o", fmt.Sprintf("jsonpath=%s", jsonpath))
+	return kindctl("-n", kcpNamespace, "get", "secret", name, "-o", "jsonpath={.data.kubeconfig}")
 }
 
 var _ = SynchronizedBeforeSuite(func() {
@@ -728,7 +729,7 @@ spec:
 	})
 
 	// Extract the kubeconfig and rewrite the server URL to use localhost NodePort.
-	kcRaw := kindctlSecret(kcpNamespace, "e2e-admin-kubeconfig", "{.data.kubeconfig}")
+	kcRaw := kindctlSecret("e2e-admin-kubeconfig")
 	kcBytes, err := decodeBase64(kcRaw)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -811,7 +812,7 @@ spec:
 	// it to the front-proxy URL with the dep-ctrl workspace path. The client cert
 	// from root-client-ca works for both front-proxy and direct shard access.
 	fpHostname := fmt.Sprintf("kcp-front-proxy.%s.svc.cluster.local", kcpNamespace)
-	kcRaw := kindctlSecret(kcpNamespace, "e2e-controller-kubeconfig", "{.data.kubeconfig}")
+	kcRaw := kindctlSecret("e2e-controller-kubeconfig")
 	kcBytes, err := decodeBase64(kcRaw)
 	Expect(err).NotTo(HaveOccurred())
 	shardURL := extractServerFromKubeconfig(kcBytes)
@@ -823,7 +824,7 @@ spec:
 	if fpPort == "" {
 		fpPort = "6443"
 	}
-	inClusterFPURL = fmt.Sprintf("https://%s:%s", fpHostname, fpPort)
+	inClusterFPURL = "https://" + net.JoinHostPort(fpHostname, fpPort)
 	depCtrlURL := inClusterFPURL + "/clusters/" + depCtrlPath
 
 	// Rewrite kubeconfigs: shard URL -> front-proxy + workspace path.
@@ -840,7 +841,7 @@ spec:
 // server URL, and writes it to the given path.
 func extractAndRewriteKubeconfig(secretName, outputPath, oldURL, newURL string) {
 	GinkgoHelper()
-	kcRaw := kindctlSecret(kcpNamespace, secretName, "{.data.kubeconfig}")
+	kcRaw := kindctlSecret(secretName)
 	kcBytes, err := decodeBase64(kcRaw)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -922,7 +923,7 @@ spec:
 
 	// Extract the shard kubeconfig.
 	shardKCPath := filepath.Join(tmpDir, kubeconfigName+".kubeconfig")
-	kcRaw := kindctlSecret(kcpNamespace, secretName, "{.data.kubeconfig}")
+	kcRaw := kindctlSecret(secretName)
 	kcBytes, err := decodeBase64(kcRaw)
 	Expect(err).NotTo(HaveOccurred())
 
