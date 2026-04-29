@@ -1,5 +1,5 @@
 # RBAC in the dep-ctrl workspace for the dependency-controller.
-# Applied during setup using a bootstrap (system:masters) identity.
+# Applied during setup using a system:kcp:admin identity via front-proxy.
 #
 # The controller connects to the dep-ctrl workspace to:
 # 1. Discover the VW URL via APIExportEndpointSlice

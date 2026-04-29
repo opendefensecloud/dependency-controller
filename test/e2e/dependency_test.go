@@ -137,6 +137,39 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		})
 	})
 
+	It("should block VPC deletion on a secondary shard (consumer2)", func() {
+		// consumer2 is scheduled on shard1 (the secondary shard), so this
+		// validates that webhook protection works across shards.
+		By("creating a VPC in consumer2 (shard1)")
+		applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vpc-shard-vpc.yaml"), nil)
+
+		By("creating a VM referencing the VPC in consumer2 (shard1)")
+		applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vm-shard-vm.yaml"), nil)
+
+		By("waiting for the webhook to block shard-vpc deletion on shard1")
+		waitFor(time.Minute, "webhook blocks shard-vpc deletion on shard1", func() error {
+			out, err := kcpctlNoFail(wsConsumer2, "delete", "vpc", "shard-vpc", "--namespace", "default")
+			if err == nil {
+				applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vpc-shard-vpc.yaml"), nil)
+				return fmt.Errorf("deletion was not blocked, recreated VPC")
+			}
+			if strings.Contains(out, "still referenced by") {
+				return nil
+			}
+
+			return fmt.Errorf("unexpected output: %s", out)
+		})
+
+		By("deleting the VM to release the VPC")
+		kcpctl(wsConsumer2, "delete", "virtualmachine", "shard-vm", "--namespace", "default")
+
+		By("verifying VPC deletion now succeeds on shard1")
+		waitFor(time.Minute, "shard-vpc deletion allowed after VM removed", func() error {
+			_, err := kcpctlNoFail(wsConsumer2, "delete", "vpc", "shard-vpc", "--namespace", "default")
+			return err
+		})
+	})
+
 	It("should allow deletion when skip-protection annotation is set", func() {
 		By("creating a VPC and VM in consumer1")
 		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-skip-vpc.yaml"), nil)

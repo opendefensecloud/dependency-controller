@@ -1,5 +1,5 @@
 # RBAC in the root workspace for the dependency-controller system.
-# Applied during setup using a bootstrap (system:masters) identity.
+# Applied during setup using a system:kcp:admin identity via front-proxy.
 #
 # Both components need workspaces/content access to enter the dep-ctrl
 # workspace (where their kubeconfig points). Webhook installation and
