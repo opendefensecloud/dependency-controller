@@ -282,7 +282,7 @@ Key values:
 
 | Value | Purpose |
 |---|---|
-| `kcpBaseHost` | Root kcp URL (no workspace path). Used by the controller to resolve workspace paths and by the webhook to discover APIExport VW URLs. |
+| `kcpBaseHost` | Root kcp URL (no workspace path). Used by the controller to resolve workspace paths and by the webhook for provider ESS discovery. |
 | `controller.kubeconfig.secretName` | Secret containing the controller's kubeconfig (from Step 3). |
 | `webhook.kubeconfig.secretName` | Secret containing the webhook's kubeconfig (from Step 3). |
 | `webhook.tls.certManager.issuerRef.name` | cert-manager issuer for the webhook's TLS certificate. |

@@ -14,7 +14,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: dependency-controller
+  name: dependency-controller-depctrl
 rules:
   - apiGroups: ["apis.kcp.io"]
     resources: ["apiexportendpointslices"]
@@ -27,12 +27,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: dependency-controller
+  name: dependency-controller-depctrl
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: dependency-controller
+  name: dependency-controller-depctrl
 subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: User
     name: "system:serviceaccount:dependency-system:dependency-controller"
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "system:serviceaccount:dependency-system:dependency-webhook"

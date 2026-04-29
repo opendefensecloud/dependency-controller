@@ -63,6 +63,9 @@ func main() {
 	cfg := ctrl.GetConfigOrDie()
 
 	// Derive base config (root kcp URL without workspace path).
+	// Used by the RuleCacheManager for direct workspace access when discovering
+	// APIExportEndpointSlices — the dep-ctrl VW does not expose kcp-internal
+	// types (apis.kcp.io) in API discovery.
 	baseCfg := rest.CopyConfig(cfg)
 	if kcpBaseHost != "" {
 		baseCfg.Host = kcpBaseHost

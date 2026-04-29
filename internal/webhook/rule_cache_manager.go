@@ -38,6 +38,10 @@ type RuleCacheManager struct {
 	DepCtrlManager mcmanager.Manager
 
 	// BaseConfig is the root kcp REST config (no workspace path suffix).
+	// Used by startProviderManager to create direct workspace clients for
+	// APIExportEndpointSlice discovery — the dep-ctrl VW does not expose
+	// kcp-internal types (apis.kcp.io) in API discovery, so VW clients
+	// cannot list them.
 	BaseConfig *rest.Config
 
 	// Scheme is the runtime scheme used when creating per-rule managers.
@@ -258,6 +262,11 @@ func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, clusterN
 // startProviderManager creates a new multicluster manager backed by the given
 // APIExport's virtual workspace. The manager is started in a background
 // goroutine and the returned cancel function tears it down.
+//
+// Uses BaseConfig (direct workspace client) for APIExportEndpointSlice
+// discovery because the dep-ctrl VW does not expose kcp-internal types
+// (apis.kcp.io) in API discovery — VW clients cannot build REST mappings
+// for them. This requires shard-wide apiexportendpointslices read RBAC.
 func (m *RuleCacheManager) startProviderManager(ctx context.Context, clusterName string, apiExportName string) (mcmanager.Manager, context.CancelFunc, error) {
 	logger := log.FromContext(ctx).WithValues("apiExport", apiExportName, "cluster", clusterName)
 
