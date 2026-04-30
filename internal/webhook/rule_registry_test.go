@@ -23,10 +23,9 @@ func TestRuleRegistry_RegisterAndFind(t *testing.T) {
 		Cancel: func() {},
 		Rule: v1alpha1.DependencyRuleSpec{
 			Dependent: v1alpha1.DependentRef{
-				Group:    "compute.test.io",
-				Version:  "v1",
-				Kind:     "VirtualMachine",
-				Resource: "virtualmachines",
+				Group:   "compute.test.io",
+				Version: "v1",
+				Kind:    "VirtualMachine",
 			},
 		},
 		DependentGVK: schema.GroupVersionKind{Group: "compute.test.io", Version: "v1", Kind: "VirtualMachine"},
@@ -144,34 +143,6 @@ func TestRuleRegistry_TrackCluster(t *testing.T) {
 	}
 }
 
-func TestRuleRegistry_AllDependentGVRs(t *testing.T) {
-	r := NewRuleRegistry()
-
-	r.Register("c1/rule1", &RuleState{
-		Cancel: func() {},
-		Rule: v1alpha1.DependencyRuleSpec{
-			Dependent: v1alpha1.DependentRef{Group: "compute.io", Version: "v1", Resource: "vms"},
-		},
-	})
-	r.Register("c1/rule2", &RuleState{
-		Cancel: func() {},
-		Rule: v1alpha1.DependencyRuleSpec{
-			Dependent: v1alpha1.DependentRef{Group: "compute.io", Version: "v1", Resource: "vms"},
-		},
-	})
-	r.Register("c1/rule3", &RuleState{
-		Cancel: func() {},
-		Rule: v1alpha1.DependencyRuleSpec{
-			Dependent: v1alpha1.DependentRef{Group: "db.io", Version: "v1", Resource: "databases"},
-		},
-	})
-
-	gvrs := r.AllDependentGVRs()
-	if len(gvrs) != 2 {
-		t.Errorf("expected 2 deduplicated GVRs, got %d", len(gvrs))
-	}
-}
-
 func TestRuleRegistry_MarkReady(t *testing.T) {
 	r := NewRuleRegistry()
 
@@ -260,7 +231,7 @@ func TestRuleRegistry_ConcurrentAccess(t *testing.T) {
 						Cancel:      func() {},
 						IndexFields: []IndexedField{{FieldPath: ".spec.ref", TargetGVR: vpcGVR}},
 						Rule: v1alpha1.DependencyRuleSpec{
-							Dependent: v1alpha1.DependentRef{Group: "compute.io", Version: "v1", Resource: "vms"},
+							Dependent: v1alpha1.DependentRef{Group: "compute.io", Version: "v1", Kind: "VM"},
 						},
 					})
 				case 1:
