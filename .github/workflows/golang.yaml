@@ -44,7 +44,7 @@ jobs:
       - name: lint-license
         run: make lint-no-golangci
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
 
   test:
     needs: lint
