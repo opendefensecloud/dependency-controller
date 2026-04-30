@@ -66,17 +66,19 @@ func NewWebhookInstaller(baseCfg *rest.Config, webhookURL string, caBundle []byt
 }
 
 // EnsureWebhooks installs or updates ValidatingWebhookConfigurations for all
-// dependency targets in the given rule.
-func (w *WebhookInstaller) EnsureWebhooks(ctx context.Context, ruleKey string, rule *v1alpha1.DependencyRule) error {
-	// Group targets by provider workspace so we do one update per workspace.
-	byWorkspace := make(map[string][]v1alpha1.DependencyTarget)
+// dependency targets in the given rule. The clusterNames map translates
+// workspace paths (from APIExportRef.Path) to logical cluster names used
+// to connect via the virtual workspace.
+func (w *WebhookInstaller) EnsureWebhooks(ctx context.Context, ruleKey string, rule *v1alpha1.DependencyRule, clusterNames map[string]string) error {
+	// Group targets by logical cluster name so we do one update per workspace.
+	byCluster := make(map[string][]v1alpha1.DependencyTarget)
 	for _, dep := range rule.Spec.Dependencies {
-		wsPath := dep.APIExportRef.Path
-		byWorkspace[wsPath] = append(byWorkspace[wsPath], dep)
+		clusterName := clusterNames[dep.APIExportRef.Path]
+		byCluster[clusterName] = append(byCluster[clusterName], dep)
 	}
 
-	for wsPath, deps := range byWorkspace {
-		if err := w.ensureWebhookForWorkspace(ctx, ruleKey, wsPath, deps); err != nil {
+	for clusterName, deps := range byCluster {
+		if err := w.ensureWebhookForWorkspace(ctx, ruleKey, clusterName, deps); err != nil {
 			return err
 		}
 	}
