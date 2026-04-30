@@ -86,6 +86,10 @@ func main() {
 		setupLog.Error(err, "unable to add healthz check")
 		os.Exit(1)
 	}
+	// Readyz uses Ping because the controller has no safety-critical readiness
+	// gate. Unlike the webhook (which must block admission until its rule registry
+	// is populated), the controller only installs ValidatingWebhookConfigurations —
+	// if it reconciles before initialization completes, it retries on the next event.
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to add readyz check")
 		os.Exit(1)

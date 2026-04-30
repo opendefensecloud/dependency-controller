@@ -69,14 +69,6 @@ func TestCRDFieldValidation(t *testing.T) {
 			invalid:   []string{"", "virtualMachine", "1Foo", "Foo-Bar", "Foo.Bar", "Foo_Bar"},
 		},
 		{
-			path:      "spec.dependent.resource",
-			pattern:   `^[a-z][a-z0-9]*$`,
-			minLength: 1,
-			maxLength: 63,
-			valid:     []string{"a", "vpcs", "virtualmachines", "foo123"},
-			invalid:   []string{"", "VPCs", "vpc-s", "vpc.s", "1vpcs", "vpc_s"},
-		},
-		{
 			path:      "spec.dependencies.items.apiExportRef.path",
 			pattern:   `^[a-z][a-z0-9-]*(:[a-z][a-z0-9-]*)*$`,
 			minLength: 1,

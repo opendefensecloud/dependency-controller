@@ -150,30 +150,6 @@ func (r *RuleRegistry) AllTargetGVRs() []schema.GroupVersionResource {
 	return gvrs
 }
 
-// AllDependentGVRs returns the deduplicated set of all dependent resource GVRs
-// across all registered rules.
-func (r *RuleRegistry) AllDependentGVRs() []schema.GroupVersionResource {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	seen := make(map[schema.GroupVersionResource]struct{})
-	var gvrs []schema.GroupVersionResource
-	for _, state := range r.rules {
-		dep := state.Rule.Dependent
-		gvr := schema.GroupVersionResource{
-			Group:    dep.Group,
-			Version:  dep.Version,
-			Resource: dep.Resource,
-		}
-		if _, ok := seen[gvr]; !ok {
-			seen[gvr] = struct{}{}
-			gvrs = append(gvrs, gvr)
-		}
-	}
-
-	return gvrs
-}
-
 // rebuildTargetIndex rebuilds the byTarget reverse index from scratch.
 // Must be called with the write lock held.
 func (r *RuleRegistry) rebuildTargetIndex() {

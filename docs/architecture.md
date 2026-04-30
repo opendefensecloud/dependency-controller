@@ -318,7 +318,6 @@ spec:
     group: compute.test.io
     version: v1
     kind: VirtualMachine
-    resource: virtualmachines
   dependencies:
     - apiExportRef:
         path: "root:network-provider"
