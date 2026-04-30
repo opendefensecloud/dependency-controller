@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	"github.com/kcp-dev/logicalcluster/v3"
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -21,6 +20,7 @@ import (
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
+	"go.opendefense.cloud/dependency-controller/internal/kcp"
 )
 
 // DependencyRuleReconciler watches DependencyRule objects across provider workspaces
@@ -74,15 +74,19 @@ func (r *DependencyRuleReconciler) ensureInitialized(ctx context.Context) error 
 		return fmt.Errorf("creating client for VW URL discovery: %w", err)
 	}
 
-	var ess apisv1alpha1.APIExportEndpointSlice
-	if err := directClient.Get(ctx, client.ObjectKey{Name: r.APIExportName}, &ess); err != nil {
-		return fmt.Errorf("getting APIExportEndpointSlice %s: %w", r.APIExportName, err)
+	ess, err := kcp.FindEndpointSlice(ctx, directClient, r.APIExportName)
+	if err != nil {
+		return fmt.Errorf("resolving APIExportEndpointSlice for %s: %w", r.APIExportName, err)
 	}
 
 	if len(ess.Status.APIExportEndpoints) == 0 {
-		return fmt.Errorf("APIExportEndpointSlice %s has no endpoints", r.APIExportName)
+		return fmt.Errorf("APIExportEndpointSlice %s has no endpoints", ess.Name)
 	}
 
+	// TODO: The VW URL is cached for the lifetime of the process. If the URL
+	// changes (e.g., kcp shard topology change), webhook installation will fail
+	// until the pod is restarted. Consider watching the APIExportEndpointSlice
+	// to re-discover the URL on changes.
 	vwURL := ess.Status.APIExportEndpoints[0].URL
 	r.vwBaseCfg = rest.CopyConfig(localCfg)
 	r.vwBaseCfg.Host = vwURL

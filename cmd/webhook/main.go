@@ -17,6 +17,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -26,6 +27,7 @@ import (
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
+	"go.opendefense.cloud/dependency-controller/internal/kcp"
 	"go.opendefense.cloud/dependency-controller/internal/webhook"
 )
 
@@ -66,8 +68,21 @@ func main() {
 		baseCfg.Host = kcpBaseHost
 	}
 
+	// Resolve the APIExportEndpointSlice name for the dep-ctrl's APIExport.
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create client for endpoint slice discovery")
+		os.Exit(1)
+	}
+
+	ess, err := kcp.FindEndpointSlice(context.Background(), directClient, apiExportName)
+	if err != nil {
+		setupLog.Error(err, "unable to find APIExportEndpointSlice", "apiExport", apiExportName)
+		os.Exit(1)
+	}
+
 	// Create apiexport provider for the dependency-controller's own APIExport.
-	depCtrlProvider, err := apiexport.New(cfg, apiExportName, apiexport.Options{
+	depCtrlProvider, err := apiexport.New(cfg, ess.Name, apiexport.Options{
 		Scheme: scheme,
 	})
 	if err != nil {
