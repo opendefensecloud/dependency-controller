@@ -23,9 +23,10 @@ func TestRuleRegistry_RegisterAndFind(t *testing.T) {
 		Cancel: func() {},
 		Rule: v1alpha1.DependencyRuleSpec{
 			Dependent: v1alpha1.DependentRef{
-				Group:   "compute.test.io",
-				Version: "v1",
-				Kind:    "VirtualMachine",
+				Group:    "compute.test.io",
+				Version:  "v1",
+				Kind:     "VirtualMachine",
+				Resource: "virtualmachines",
 			},
 		},
 		DependentGVK: schema.GroupVersionKind{Group: "compute.test.io", Version: "v1", Kind: "VirtualMachine"},
@@ -231,7 +232,7 @@ func TestRuleRegistry_ConcurrentAccess(t *testing.T) {
 						Cancel:      func() {},
 						IndexFields: []IndexedField{{FieldPath: ".spec.ref", TargetGVR: vpcGVR}},
 						Rule: v1alpha1.DependencyRuleSpec{
-							Dependent: v1alpha1.DependentRef{Group: "compute.io", Version: "v1", Kind: "VM"},
+							Dependent: v1alpha1.DependentRef{Group: "compute.io", Version: "v1", Kind: "VM", Resource: "vms"},
 						},
 					})
 				case 1:

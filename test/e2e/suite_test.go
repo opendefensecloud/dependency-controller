@@ -4,11 +4,9 @@
 package e2e
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -154,91 +152,16 @@ func kcpctlRootNoFail(args ...string) (string, error) {
 	}, args...)...)
 }
 
-// subjectAccessReview is the JSON structure for a SubjectAccessReview response.
-type subjectAccessReview struct {
-	Status struct {
-		Allowed bool   `json:"allowed"`
-		Reason  string `json:"reason"`
-	} `json:"status"`
-}
-
-// webhookSACanAccessExport checks if the webhook SA has apiexports/content
-// access for the given APIExport in the specified workspace, using a
-// SubjectAccessReview evaluated by kcp.
-func webhookSACanAccessExport(wsPath, exportName string) (bool, error) {
-	sarJSON := fmt.Sprintf(`{
-  "apiVersion": "authorization.k8s.io/v1",
-  "kind": "SubjectAccessReview",
-  "spec": {
-    "user": "system:serviceaccount:%s:dependency-webhook",
-    "groups": ["system:serviceaccounts", "system:serviceaccounts:%s"],
-    "resourceAttributes": {
-      "group": "apis.kcp.io",
-      "resource": "apiexports",
-      "subresource": "content",
-      "name": %q,
-      "verb": "get"
-    }
-  }
-}`, depNamespace, depNamespace, exportName)
-
-	cmd := exec.CommandContext(context.Background(), kubectlBin,
-		"--kubeconfig", kcpHostKubeconfig,
+// acceptPermissionClaim patches an APIBinding in the given workspace to accept
+// a dynamically added permissionClaim for the specified group and resource.
+func acceptPermissionClaim(wsPath, bindingName, group, resource string) {
+	GinkgoHelper()
+	// Use kubectl patch to add the accepted claim to the binding's permissionClaims list.
+	patch := fmt.Sprintf(`[{"op":"add","path":"/spec/permissionClaims/-","value":{"group":%q,"resource":%q,"verbs":["get","list","watch"],"selector":{"matchAll":true},"state":"Accepted"}}]`,
+		group, resource)
+	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
 		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsPath),
-		"create", "-f", "-", "-o", "json",
-	)
-	cmd.Stdin = strings.NewReader(sarJSON)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("SAR failed in %s: %s %v", wsPath, buf.String(), err)
-	}
-
-	var sar subjectAccessReview
-	if err := json.Unmarshal(buf.Bytes(), &sar); err != nil {
-		return false, fmt.Errorf("parsing SAR response: %w", err)
-	}
-
-	return sar.Status.Allowed, nil
-}
-
-// webhookSACanAccessResource checks if the webhook SA can access a specific
-// resource type in a workspace, using a SubjectAccessReview.
-func webhookSACanAccessResource(wsPath, group, resource, verb string) (bool, error) {
-	sarJSON := fmt.Sprintf(`{
-  "apiVersion": "authorization.k8s.io/v1",
-  "kind": "SubjectAccessReview",
-  "spec": {
-    "user": "system:serviceaccount:%s:dependency-webhook",
-    "groups": ["system:serviceaccounts", "system:serviceaccounts:%s"],
-    "resourceAttributes": {
-      "group": %q,
-      "resource": %q,
-      "verb": %q
-    }
-  }
-}`, depNamespace, depNamespace, group, resource, verb)
-
-	cmd := exec.CommandContext(context.Background(), kubectlBin,
-		"--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsPath),
-		"create", "-f", "-", "-o", "json",
-	)
-	cmd.Stdin = strings.NewReader(sarJSON)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("SAR failed in %s: %s %v", wsPath, buf.String(), err)
-	}
-
-	var sar subjectAccessReview
-	if err := json.Unmarshal(buf.Bytes(), &sar); err != nil {
-		return false, fmt.Errorf("parsing SAR response: %w", err)
-	}
-
-	return sar.Status.Allowed, nil
+		"patch", "apibinding", bindingName, "--type=json", "-p", patch)
 }
 
 // applyFixtureToWS applies a YAML fixture to a kcp workspace with placeholder substitution.
@@ -557,7 +480,7 @@ spec:
   selfSigned: {}`, kcpNamespace))
 
 	// Create RootShard. certificateTemplates adds localhost to the server cert
-	// so we can port-forward to the shard for system:admin RBAC bootstrapping.
+	// so we can port-forward to the shard for direct access during bootstrap.
 	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
 kind: RootShard
 metadata:
@@ -875,87 +798,6 @@ func bootstrapRBAC() {
 		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsDepCtrl),
 		"apply", "-f", filepath.Join(fixturesDir, "depctrl-rbac-bootstrap.yaml"))
 
-	// Apply shard-wide RBAC in system:admin on each shard.
-	// system:admin is only accessible directly on the shard (not via front-proxy),
-	// so we create shard-specific kubeconfigs and port-forward to the shard services.
-	applyShardAdminRBAC("root", "rootShardRef", "e2e-root-shard-admin")
-	applyShardAdminRBAC("shard1", "shardRef", "e2e-shard1-admin")
-}
-
-// applyShardAdminRBAC creates a Kubeconfig CR targeting a specific shard, extracts
-// the generated kubeconfig, port-forwards to the shard service, and applies the
-// shard-admin RBAC to the system:admin logical cluster.
-func applyShardAdminRBAC(shardName, refField, kubeconfigName string) {
-	GinkgoHelper()
-
-	// Build the Kubeconfig CR targeting the shard.
-	var targetSpec string
-	if refField == "rootShardRef" {
-		targetSpec = fmt.Sprintf(`rootShardRef:
-      name: %s`, shardName)
-	} else {
-		targetSpec = fmt.Sprintf(`shardRef:
-      name: %s`, shardName)
-	}
-
-	secretName := kubeconfigName + "-kubeconfig"
-	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
-kind: Kubeconfig
-metadata:
-  name: %[1]s
-  namespace: %[2]s
-spec:
-  username: e2e-bootstrap
-  groups:
-    - "system:masters"
-  validity: 8766h
-  secretRef:
-    name: %[3]s
-  target:
-    %[4]s`, kubeconfigName, kcpNamespace, secretName, targetSpec))
-
-	waitFor(2*time.Minute, fmt.Sprintf("%s kubeconfig created", kubeconfigName), func() error {
-		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", secretName,
-			"-o", "jsonpath={.data.kubeconfig}")
-
-		return err
-	})
-
-	// Extract the shard kubeconfig.
-	shardKCPath := filepath.Join(tmpDir, kubeconfigName+".kubeconfig")
-	kcRaw := kindctlSecret(secretName)
-	kcBytes, err := decodeBase64(kcRaw)
-	Expect(err).NotTo(HaveOccurred())
-
-	// Parse the in-cluster server URL from the kubeconfig.
-	serverURL := extractServerFromKubeconfig(kcBytes)
-	parsed, err := url.Parse(serverURL)
-	Expect(err).NotTo(HaveOccurred())
-
-	// Determine the shard service name from the hostname (e.g., root-kcp.kcp-system.svc.cluster.local).
-	svcName := strings.SplitN(parsed.Hostname(), ".", 2)[0]
-	svcPort := parsed.Port()
-	if svcPort == "" {
-		svcPort = "6443"
-	}
-
-	// Start port-forward to the shard service.
-	pfCtx, pfCancel := context.WithCancel(context.Background())
-	defer pfCancel()
-
-	localPort := startPortForward(pfCtx, svcName, svcPort)
-
-	// Rewrite the kubeconfig to use the forwarded localhost port.
-	rewritten := strings.ReplaceAll(string(kcBytes), serverURL,
-		fmt.Sprintf("https://localhost:%s", localPort))
-	Expect(os.WriteFile(shardKCPath, []byte(rewritten), 0o600)).To(Succeed())
-
-	// Apply RBAC to system:admin via the port-forward.
-	// --validate=false is needed because system:admin does not serve OpenAPI.
-	run(kubectlBin, "--kubeconfig", shardKCPath,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/system:admin", localPort),
-		"apply", "--validate=false",
-		"-f", filepath.Join(fixturesDir, "shard-admin-rbac-bootstrap.yaml"))
 }
 
 // extractServerFromKubeconfig extracts the server URL from a kubeconfig YAML.
@@ -971,49 +813,6 @@ func extractServerFromKubeconfig(kubeconfig []byte) string {
 }
 
 // portForwardRe matches the "Forwarding from 127.0.0.1:PORT -> ..." line.
-var portForwardRe = regexp.MustCompile(`Forwarding from 127\.0\.0\.1:(\d+)`)
-
-// startPortForward starts a kubectl port-forward to the given service and returns
-// the assigned local port. The port-forward is cancelled when ctx is done.
-func startPortForward(ctx context.Context, svcName, svcPort string) string {
-	GinkgoHelper()
-	cmd := exec.CommandContext(ctx, kubectlBin, "--context", "kind-"+kindClusterName,
-		"-n", kcpNamespace, "port-forward", "svc/"+svcName, ":"+svcPort)
-
-	stdout, err := cmd.StdoutPipe()
-	Expect(err).NotTo(HaveOccurred())
-	cmd.Stderr = cmd.Stdout // merge stderr into stdout
-
-	Expect(cmd.Start()).To(Succeed())
-
-	// Read lines until we see the "Forwarding from ..." message.
-	scanner := bufio.NewScanner(stdout)
-	portCh := make(chan string, 1)
-
-	go func() {
-		for scanner.Scan() {
-			line := scanner.Text()
-			if m := portForwardRe.FindStringSubmatch(line); len(m) > 1 {
-				portCh <- m[1]
-
-				return
-			}
-		}
-	}()
-
-	select {
-	case port := <-portCh:
-		// Give the port-forward a moment to be fully ready.
-		time.Sleep(500 * time.Millisecond)
-
-		return port
-	case <-time.After(30 * time.Second):
-		Fail(fmt.Sprintf("timed out waiting for port-forward to svc/%s", svcName))
-
-		return ""
-	}
-}
-
 func buildAndLoadImage() {
 	run(dockerBin, "build", "-t", imageName, rootDir)
 	run(kindBin, "load", "docker-image", imageName, "--name", kindClusterName)

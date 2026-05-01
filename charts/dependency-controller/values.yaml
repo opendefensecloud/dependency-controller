@@ -8,7 +8,7 @@ imagePullSecrets: []
 apiExportName: dependencies.opendefense.cloud
 
 # Base kcp host URL (without workspace path). Used by the controller to resolve
-# workspace paths, and by the webhook for provider ESS discovery.
+# workspace paths to logical cluster names.
 # If empty, derived from kubeconfig.
 kcpBaseHost: ""
 

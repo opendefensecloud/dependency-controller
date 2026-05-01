@@ -113,10 +113,13 @@ flowchart TD
 
 **Entry point:** [`cmd/controller/main.go`](../cmd/controller/main.go)
 
-The controller watches `DependencyRule` objects and ensures admission webhooks
-exist in the right provider workspaces. The webhook's read access to dependent
-resources is granted shard-wide via `system:admin` bootstrap RBAC, so the
-controller only handles webhook installation.
+The controller watches `DependencyRule` objects and performs two tasks:
+
+1. **PermissionClaim management** — dynamically adds permissionClaims to the
+   dep-ctrl APIExport for each dependent resource type referenced in
+   DependencyRules, so the webhook can watch those resources through the VW.
+2. **Webhook installation** — ensures `ValidatingWebhookConfiguration` objects
+   exist in the right provider workspaces.
 
 All operations in provider workspaces are routed through the dep-ctrl APIExport's
 virtual workspace, authorized by `permissionClaims`. The controller never connects

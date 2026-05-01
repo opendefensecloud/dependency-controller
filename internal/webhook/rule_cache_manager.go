@@ -37,19 +37,12 @@ type RuleCacheManager struct {
 	// DepCtrlManager is the multicluster manager for the dep-ctrl's APIExport.
 	DepCtrlManager mcmanager.Manager
 
-	// BaseConfig is the root kcp REST config (no workspace path suffix).
-	// Used by startProviderManager to create direct workspace clients for
-	// APIExportEndpointSlice discovery — the dep-ctrl VW does not expose
-	// kcp-internal types (apis.kcp.io) in API discovery, so VW clients
-	// cannot list them.
-	BaseConfig *rest.Config
-
 	// Scheme is the runtime scheme used when creating per-rule managers.
 	Scheme *runtime.Scheme
 
 	// APIExportName is the name of the dep-ctrl APIExport (and its
 	// APIExportEndpointSlice), used to resolve the virtual workspace URL
-	// during initial registry population.
+	// during initial registry population and per-rule manager creation.
 	APIExportName string
 
 	// Registry holds the per-rule cache state queried by the DeletionValidator.
@@ -81,7 +74,7 @@ func (m *RuleCacheManager) PopulateRegistry(ctx context.Context) error {
 			rule := &ruleList.Items[i]
 			clusterName := logicalcluster.From(rule)
 			key := ruleStateKey(clusterName.String(), rule.Name)
-			if err := m.ensureCache(ctx, key, clusterName.String(), rule); err != nil {
+			if err := m.ensureCache(ctx, key, rule); err != nil {
 				return fmt.Errorf("populating rule %s/%s: %w", clusterName, rule.Name, err)
 			}
 		}
@@ -157,7 +150,7 @@ func (m *RuleCacheManager) Reconcile(ctx context.Context, req mcreconcile.Reques
 		return ctrl.Result{}, err
 	}
 
-	if err := m.ensureCache(ctx, key, clusterName, &rule); err != nil {
+	if err := m.ensureCache(ctx, key, &rule); err != nil {
 		logger.Error(err, "failed to ensure cache for rule")
 		return ctrl.Result{}, err
 	}
@@ -169,14 +162,14 @@ func (m *RuleCacheManager) Reconcile(ctx context.Context, req mcreconcile.Reques
 // type, registers field indices for each dependency target, and stores the
 // resulting cache state in the registry. If a cache already exists for the
 // given key this is a no-op.
-func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, clusterName string, rule *v1alpha1.DependencyRule) error {
+func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, rule *v1alpha1.DependencyRule) error {
 	if m.Registry.Exists(key) {
 		return nil
 	}
 
 	dep := rule.Spec.Dependent
 
-	mgr, mgrCancel, err := m.startProviderManager(ctx, clusterName, dep.APIExportName)
+	mgr, mgrCancel, err := m.startProviderManager(ctx)
 	if err != nil {
 		return fmt.Errorf("creating manager for rule %s: %w", rule.Name, err)
 	}
@@ -259,39 +252,37 @@ func (m *RuleCacheManager) ensureCache(ctx context.Context, key string, clusterN
 	return nil
 }
 
-// startProviderManager creates a new multicluster manager backed by the given
-// APIExport's virtual workspace. The manager is started in a background
-// goroutine and the returned cancel function tears it down.
+// startProviderManager creates a new multicluster manager backed by the
+// dep-ctrl APIExport's virtual workspace. Dependent resources are visible
+// through this VW because the controller dynamically adds permissionClaims
+// for each dependent resource type, and provider workspaces accept them.
 //
-// Uses BaseConfig (direct workspace client) for APIExportEndpointSlice
-// discovery because the dep-ctrl VW does not expose kcp-internal types
-// (apis.kcp.io) in API discovery — VW clients cannot build REST mappings
-// for them. This requires shard-wide apiexportendpointslices read RBAC.
-func (m *RuleCacheManager) startProviderManager(ctx context.Context, clusterName string, apiExportName string) (mcmanager.Manager, context.CancelFunc, error) {
-	logger := log.FromContext(ctx).WithValues("apiExport", apiExportName, "cluster", clusterName)
+// The manager is started in a background goroutine and the returned cancel
+// function tears it down.
+func (m *RuleCacheManager) startProviderManager(ctx context.Context) (mcmanager.Manager, context.CancelFunc, error) {
+	logger := log.FromContext(ctx)
 
-	cfg := rest.CopyConfig(m.BaseConfig)
-	cfg.Host += logicalcluster.NewPath(clusterName).RequestPath()
+	localCfg := m.DepCtrlManager.GetLocalManager().GetConfig()
 
-	// Resolve the APIExportEndpointSlice name — it may differ from the APIExport name.
-	wsClient, err := client.New(cfg, client.Options{Scheme: m.Scheme})
+	// Resolve the dep-ctrl's APIExportEndpointSlice from the local workspace.
+	directClient, err := client.New(localCfg, client.Options{Scheme: m.Scheme})
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating client for endpoint slice discovery: %w", err)
+		return nil, nil, fmt.Errorf("creating direct client for ESS discovery: %w", err)
 	}
 
-	ess, err := kcp.FindEndpointSlice(ctx, wsClient, apiExportName)
+	ess, err := kcp.FindEndpointSlice(ctx, directClient, m.APIExportName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolving APIExportEndpointSlice for %s: %w", apiExportName, err)
+		return nil, nil, fmt.Errorf("resolving APIExportEndpointSlice for %s: %w", m.APIExportName, err)
 	}
 
-	provider, err := apiexport.New(cfg, ess.Name, apiexport.Options{
+	provider, err := apiexport.New(localCfg, ess.Name, apiexport.Options{
 		Scheme: m.Scheme,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating apiexport provider: %w", err)
 	}
 
-	mgr, err := mcmanager.New(cfg, provider, manager.Options{
+	mgr, err := mcmanager.New(localCfg, provider, manager.Options{
 		Scheme:                 m.Scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
@@ -303,9 +294,9 @@ func (m *RuleCacheManager) startProviderManager(ctx context.Context, clusterName
 	mgrCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
-		logger.Info("starting provider manager for APIExport")
+		logger.Info("starting dep-ctrl provider manager for dependent resources")
 		if err := mgr.Start(mgrCtx); err != nil {
-			logger.Error(err, "provider manager failed")
+			logger.Error(err, "dep-ctrl provider manager failed")
 		}
 	}()
 

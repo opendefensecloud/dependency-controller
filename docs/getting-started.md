@@ -84,11 +84,7 @@ Management Cluster (kind)            kcp (via kcp-operator)
 +-------------------------------+    |                                  |
                                      | shard1                           |
                                      |   consumer2 workspace            |
-                                     |     (pinned to shard1)           |
-                                     |                                  |
-                                     | system:admin (per shard)         |
-                                     |   ClusterRole for webhook SA     |
-                                     |   (shard-wide apiexports/content)|
+                                     |     (may be on any shard)        |
                                      +----------------------------------+
 ```
 
@@ -318,59 +314,15 @@ The file
 ([`test/fixtures/depctrl-rbac-bootstrap.yaml`](../test/fixtures/depctrl-rbac-bootstrap.yaml))
 grants both the controller and webhook SAs:
 - `apiexportendpointslices` read access (for VW URL discovery at startup)
+- `apiexports` get/update (for the controller to manage permissionClaims)
 - `apiexports/content` full CRUD (for managing resources through the VW)
 
-### Shard-wide RBAC via system:admin (per shard)
-
-The webhook needs read access to `apiexports/content` and
-`apiexportendpointslices` across **all** workspaces on each shard. This is
-granted in kcp's `system:admin` logical cluster, where the Bootstrap Policy
-Authorizer evaluates RBAC for every request on that shard.
-
-**This must be applied to every shard individually**, accessed directly (not
-through the front-proxy). In a multi-shard setup, repeat for each shard:
-
-```sh
-# For each shard, create a system:masters kubeconfig and apply RBAC.
-# The kcp-operator Kubeconfig CR can target a specific shard:
-
-kubectl apply -f - <<'EOF'
-apiVersion: operator.kcp.io/v1alpha1
-kind: Kubeconfig
-metadata:
-  name: root-shard-admin
-  namespace: kcp-system
-spec:
-  username: e2e-bootstrap
-  groups:
-    - "system:masters"
-  validity: 1h
-  secretRef:
-    name: root-shard-admin-kubeconfig
-  target:
-    rootShardRef:
-      name: root
-EOF
-
-# Extract and port-forward to the shard, then apply:
-kubectl -n kcp-system port-forward svc/root-kcp 8443:6443 &
-kubectl --kubeconfig /tmp/root-shard-admin.kubeconfig \
-  --server https://localhost:8443/clusters/system:admin \
-  apply --validate=false \
-  -f test/fixtures/shard-admin-rbac-bootstrap.yaml
-```
-
-Repeat for `shard1` (using `shardRef` instead of `rootShardRef` in the
-Kubeconfig CR target, and port-forwarding to `svc/shard1-kcp`).
-
-**Why shard-wide?** The webhook watches DependencyRules via the dep-ctrl
-APIExport VW, and reads dependent resources (e.g., VirtualMachines) via other
-providers' APIExport VWs. These VWs span many workspaces across shards.
-Granting read access at the shard level avoids per-workspace RBAC management.
-
-**Why per-shard?** `system:admin` is a shard-local logical cluster -- its RBAC
-only applies to the shard it's on. In a multi-shard setup, each shard has its
-own `system:admin` and must be configured independently.
+**No shard-wide RBAC is needed.** The webhook watches dependent resources
+through the dep-ctrl APIExport's virtual workspace, authorized by dynamically
+managed permissionClaims. The controller automatically adds permissionClaims
+to the dep-ctrl APIExport for each dependent resource type referenced by a
+DependencyRule. Provider workspaces must accept these claims in their
+APIBinding (see Step 6).
 
 ### Adjusting service account names
 
@@ -602,8 +554,12 @@ A reference fixture is available at
 
 The accepted permissionClaim grants the controller permission to create
 `ValidatingWebhookConfigurations` in the workspace (for deletion protection).
-The webhook's read access to provider APIExports is handled shard-wide via the
-`system:admin` bootstrap RBAC (Step 3) -- no per-workspace RBAC is needed.
+
+When a DependencyRule is created, the controller automatically adds
+permissionClaims for the dependent resource type (e.g., `virtualmachines`) to
+the dep-ctrl APIExport. Provider workspaces must accept these additional claims
+in their APIBinding for the webhook to watch dependent resources through the
+virtual workspace.
 
 ### 6c. Create a DependencyRule
 
@@ -622,6 +578,7 @@ spec:
     group: compute.test.io
     version: v1
     kind: VirtualMachine
+    resource: virtualmachines
   dependencies:
     - apiExportRef:
         path: root:network-provider
@@ -641,8 +598,8 @@ Once applied, the controller will install a `ValidatingWebhookConfiguration`
 in `root:network-provider` (protecting VPC deletions).
 
 The webhook will:
-1. Start an indexed cache watching VirtualMachines via the compute APIExport VW
-   (authorized by the shard-wide `system:admin` RBAC from Step 3)
+1. Start an indexed cache watching VirtualMachines via the dep-ctrl APIExport VW
+   (authorized by the accepted `virtualmachines` permissionClaim)
 2. Begin serving admission requests for VPC deletions
 
 ### 6d. Create a consumer workspace and test resources
@@ -729,8 +686,8 @@ Here's the flow that makes Step 6e work:
    `ValidatingWebhookConfiguration` in the network-provider workspace
    (authorized by the accepted `validatingwebhookconfigurations` permissionClaim)
 4. The **webhook** also watches the same DependencyRule and starts an indexed
-   cache watching VirtualMachines via compute.test.io's VW (authorized by the
-   shard-wide `system:admin` RBAC from Step 3)
+   cache watching VirtualMachines via the dep-ctrl APIExport VW (authorized by
+   the accepted `virtualmachines` permissionClaim)
 5. When a consumer deletes a VPC, kcp dispatches the DELETE to the webhook
    (via the installed `ValidatingWebhookConfiguration`)
 6. The webhook queries its indexed cache: "any VMs where `.spec.vpcRef.name`
@@ -748,16 +705,16 @@ The dependency-controller is fully multi-shard aware:
   `APIExportEndpointSlice` objects, which list endpoints per shard. Caches
   span all shards automatically.
 
-- **RBAC**: The `system:admin` bootstrap RBAC must be applied to each shard
-  individually (Step 3). This is the only per-shard configuration required.
+- **RBAC**: No per-shard RBAC is needed. All access goes through the dep-ctrl
+  APIExport's virtual workspace, which handles shard routing automatically.
 
 - **Kubeconfigs**: Component kubeconfigs must use certificates signed by
   `root-client-ca` (via `rootShardRef` in the Kubeconfig CR). This CA is
   trusted by both the front-proxy and all shards, which is required because
   VW URLs point directly at shards.
 
-When adding a new shard to your kcp cluster, the only action needed is to
-apply the `shard-admin-rbac-bootstrap.yaml` to the new shard's `system:admin`.
+When adding a new shard to your kcp cluster, no additional RBAC configuration
+is needed — the dep-ctrl virtual workspace automatically routes to new shards.
 
 ## Troubleshooting
 
@@ -772,11 +729,9 @@ kubectl -n dependency-system logs -l app.kubernetes.io/component=webhook
 
 Common issues:
 - **Kubeconfig invalid** -- the webhook can't reach kcp
-- **Missing system:admin RBAC** -- the webhook SA needs shard-wide
-  `apiexports/content` and `apiexportendpointslices` read access (Step 3).
-  This must be applied to **every shard**.
-- **Missing root RBAC** -- the webhook SA needs `workspaces/content` in root
-  (Step 3)
+- **Missing RBAC** -- ensure the dep-ctrl workspace RBAC from Step 3 is applied
+- **PermissionClaims not accepted** -- provider APIBindings must accept the
+  dependent resource permissionClaims (Step 6c)
 - **Certificate not trusted by shards** -- ensure kubeconfigs use `rootShardRef`
   (not `frontProxyRef`) so certs are signed by `root-client-ca`
 

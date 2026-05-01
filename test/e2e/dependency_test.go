@@ -30,6 +30,24 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		By("creating a DependencyRule in the compute-provider workspace")
 		applyFixtureToWS(wsComputeProvider, filepath.Join(fixturesDir, "dependencyrule-vm-dependencies.yaml"), subs)
 
+		By("waiting for the controller to add permissionClaim for dependent resource type")
+		waitFor(time.Minute, "permissionClaim for compute.test.io/virtualmachines added", func() error {
+			out, err := kcpctlNoFail(wsDepCtrl, "get", "apiexport", "dependencies.opendefense.cloud",
+				"-o", "jsonpath={.spec.permissionClaims}")
+			if err != nil {
+				return err
+			}
+			if !strings.Contains(out, "virtualmachines") {
+				return fmt.Errorf("permissionClaim for virtualmachines not yet present: %s", out)
+			}
+
+			return nil
+		})
+
+		By("accepting the dependent resource permissionClaim in provider bindings")
+		acceptPermissionClaim(wsComputeProvider, "dependencies.opendefense.cloud",
+			"compute.test.io", "virtualmachines")
+
 		By("creating a VM referencing the VPC in consumer1")
 		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-my-vm.yaml"), nil)
 
@@ -38,37 +56,6 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			_, err := kcpctlNoFail(wsNetworkProvider, "get", "validatingwebhookconfiguration", "dependency-controller")
 			return err
 		})
-	})
-
-	It("should have shard-wide apiexports/content access via system:admin bootstrap RBAC", func() {
-		// The webhook SA has shard-wide apiexports/content and apiexportendpointslices
-		// access granted via system:admin RBAC (Bootstrap Policy Authorizer), instead
-		// of per-workspace dynamic RBAC managed by the controller.
-
-		By("verifying webhook SA has apiexports/content on compute.test.io in compute-provider")
-		waitFor(time.Minute, "webhook SA has apiexports/content on compute.test.io", func() error {
-			allowed, err := webhookSACanAccessExport(wsComputeProvider, "compute.test.io")
-			if err != nil {
-				return fmt.Errorf("SAR check: %w", err)
-			}
-			if !allowed {
-				return fmt.Errorf("webhook SA does not yet have apiexports/content on compute.test.io")
-			}
-
-			return nil
-		})
-
-		By("verifying webhook SA also has apiexports/content on network.test.io (shard-wide)")
-		allowed, err := webhookSACanAccessExport(wsNetworkProvider, "network.test.io")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(allowed).To(BeTrue(),
-			"webhook SA should have shard-wide apiexports/content access via system:admin")
-
-		By("verifying webhook SA cannot access secrets in compute-provider")
-		allowed, err = webhookSACanAccessResource(wsComputeProvider, "", "secrets", "list")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(allowed).To(BeFalse(),
-			"webhook SA should NOT be able to list secrets")
 	})
 
 	It("should block VPC deletion while a VM references it", func() {
@@ -137,17 +124,17 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		})
 	})
 
-	It("should block VPC deletion on a secondary shard (consumer2)", func() {
-		// consumer2 is scheduled on shard1 (the secondary shard), so this
-		// validates that webhook protection works across shards.
-		By("creating a VPC in consumer2 (shard1)")
+	It("should block VPC deletion in consumer2 (may be on a different shard)", func() {
+		// consumer2 may be scheduled on a different shard than consumer1,
+		// validating that webhook protection works regardless of shard placement.
+		By("creating a VPC in consumer2")
 		applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vpc-shard-vpc.yaml"), nil)
 
-		By("creating a VM referencing the VPC in consumer2 (shard1)")
+		By("creating a VM referencing the VPC in consumer2")
 		applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vm-shard-vm.yaml"), nil)
 
-		By("waiting for the webhook to block shard-vpc deletion on shard1")
-		waitFor(time.Minute, "webhook blocks shard-vpc deletion on shard1", func() error {
+		By("waiting for the webhook to block shard-vpc deletion")
+		waitFor(time.Minute, "webhook blocks shard-vpc deletion", func() error {
 			out, err := kcpctlNoFail(wsConsumer2, "delete", "vpc", "shard-vpc", "--namespace", "default")
 			if err == nil {
 				applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vpc-shard-vpc.yaml"), nil)
@@ -163,7 +150,7 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		By("deleting the VM to release the VPC")
 		kcpctl(wsConsumer2, "delete", "virtualmachine", "shard-vm", "--namespace", "default")
 
-		By("verifying VPC deletion now succeeds on shard1")
+		By("verifying VPC deletion now succeeds")
 		waitFor(time.Minute, "shard-vpc deletion allowed after VM removed", func() error {
 			_, err := kcpctlNoFail(wsConsumer2, "delete", "vpc", "shard-vpc", "--namespace", "default")
 			return err
@@ -241,9 +228,6 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			return err
 		}()).To(Succeed())
 
-		// RBAC is not affected by rule deletion — webhook SA retains shard-wide
-		// apiexports/content access via system:admin bootstrap RBAC.
-
 		// Clean up remaining resources.
 		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "cleanup-vm", "--namespace", "default") //nolint:errcheck
 	})
@@ -255,6 +239,22 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 
 		By("recreating the DependencyRule")
 		applyFixtureToWS(wsComputeProvider, filepath.Join(fixturesDir, "dependencyrule-vm-dependencies.yaml"), subs)
+
+		By("re-accepting the dependent resource permissionClaim after rule recreation")
+		waitFor(time.Minute, "permissionClaim re-added", func() error {
+			out, err := kcpctlNoFail(wsDepCtrl, "get", "apiexport", "dependencies.opendefense.cloud",
+				"-o", "jsonpath={.spec.permissionClaims}")
+			if err != nil {
+				return err
+			}
+			if !strings.Contains(out, "virtualmachines") {
+				return fmt.Errorf("permissionClaim not yet present: %s", out)
+			}
+
+			return nil
+		})
+		acceptPermissionClaim(wsComputeProvider, "dependencies.opendefense.cloud",
+			"compute.test.io", "virtualmachines")
 
 		By("waiting for webhook to be reinstalled in network-provider")
 		waitFor(time.Minute, "webhook reinstalled in network-provider", func() error {

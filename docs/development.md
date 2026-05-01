@@ -126,8 +126,9 @@ The test creates a 5-workspace topology:
 - **consumer1** -- on the root shard, binds to all providers
 - **consumer2** -- pinned to shard1 via location selector, verifies multi-shard
 
-Shard-wide bootstrap RBAC is applied to both shards via port-forward to each
-shard's Service, targeting `system:admin` with a `system:masters` kubeconfig.
+Bootstrap RBAC is applied in the root and dep-ctrl workspaces. No shard-wide
+RBAC is needed — dependent resources are accessed through the dep-ctrl VW via
+dynamically managed permissionClaims.
 
 Tool paths can be configured via environment variables (`KIND`, `KUBECTL`,
 `HELM`, `DOCKER`) with fallback to PATH lookup.
@@ -152,7 +153,7 @@ kcp-operator Kubeconfig CRs, and Helm deployment.
 
 1. Deploy kcp via kcp-operator (RootShard, FrontProxy, optional additional Shards)
 2. Create the dep-ctrl workspace and apply `config/kcp/` schemas
-3. Apply bootstrap RBAC in three locations: root, dep-ctrl, and system:admin (per shard)
+3. Apply bootstrap RBAC in root and dep-ctrl workspaces
 4. Generate component kubeconfigs via kcp-operator Kubeconfig CRs (use `rootShardRef`)
 5. Deploy with Helm
 6. Providers bind to the dep-ctrl APIExport (accepting permissionClaims) and create DependencyRules

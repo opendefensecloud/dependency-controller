@@ -115,7 +115,7 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 	return ctrl.Result{}, nil
 }
 
-// ensureWebhooks installs webhooks in dependency provider workspaces via the front-proxy.
+// ensureWebhooks installs webhooks in dependency provider workspaces via the virtual workspace.
 func (r *DependencyRuleReconciler) ensureWebhooks(ctx context.Context, ruleKey string, rule *v1alpha1.DependencyRule) error {
 	// Build a mapping from workspace path to logical cluster name.
 	clusterNames := make(map[string]string, len(rule.Spec.Dependencies))

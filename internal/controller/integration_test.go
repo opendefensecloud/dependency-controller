@@ -194,7 +194,6 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 
 		cacheMgr := &depwebhook.RuleCacheManager{
 			DepCtrlManager: mgr,
-			BaseConfig:     kcpConfig,
 			Scheme:         scheme.Scheme,
 			APIExportName:  "dependencies.opendefense.cloud",
 			Registry:       registry,
@@ -229,6 +228,17 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			Named("dependencyrule").
 			For(&v1alpha1.DependencyRule{}).
 			Complete(mcreconcile.Func(ruleReconciler.Reconcile))
+		Expect(err).NotTo(HaveOccurred())
+
+		// Wire up the permissionClaim reconciler.
+		claimReconciler := &controller.PermissionClaimReconciler{
+			DepCtrlManager: mgr,
+			APIExportName:  "dependencies.opendefense.cloud",
+		}
+		err = mcbuilder.ControllerManagedBy(mgr).
+			Named("permissionclaim").
+			For(&v1alpha1.DependencyRule{}).
+			Complete(mcreconcile.Func(claimReconciler.Reconcile))
 		Expect(err).NotTo(HaveOccurred())
 
 		// Wire up the webhook handler with the rule registry.

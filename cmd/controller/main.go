@@ -10,6 +10,7 @@ import (
 
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +37,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 	utilruntime.Must(apisv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(apisv1alpha2.AddToScheme(scheme))
 	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(tenancyv1alpha1.AddToScheme(scheme))
 }
@@ -134,6 +136,22 @@ func main() {
 		For(&v1alpha1.DependencyRule{}).
 		Complete(mcreconcile.Func(reconciler.Reconcile)); err != nil {
 		setupLog.Error(err, "unable to create DependencyRule controller")
+		os.Exit(1)
+	}
+
+	// Register the permissionClaim reconciler. It watches DependencyRules and
+	// dynamically adds permissionClaims to the dep-ctrl APIExport for each
+	// dependent resource type, so the webhook server can watch those resources
+	// through the virtual workspace.
+	claimReconciler := &controller.PermissionClaimReconciler{
+		DepCtrlManager: mgr,
+		APIExportName:  apiExportName,
+	}
+	if err := mcbuilder.ControllerManagedBy(mgr).
+		Named("permissionclaim").
+		For(&v1alpha1.DependencyRule{}).
+		Complete(mcreconcile.Func(claimReconciler.Reconcile)); err != nil {
+		setupLog.Error(err, "unable to create permissionClaim controller")
 		os.Exit(1)
 	}
 
