@@ -17,31 +17,32 @@ The system solves this with two cooperating binaries:
 
 - **Controller** -- watches `DependencyRule` objects and installs admission webhooks
   in provider workspaces
-- **Webhook** -- maintains indexed caches of dependent resources and serves
-  admission requests that block deletion of still-referenced resources
+- **Webhook** -- maintains a metadata registry of dependency rules and serves
+  admission requests that block deletion of still-referenced resources by querying
+  consumer workspaces directly
 
 ## Workspace Topology
 
 ```mermaid
 graph LR
     subgraph DC["Dep-Ctrl Workspace"]
-        DCExport["APIExport:<br/>DependencyRule<br/><i>+ permissionClaims</i>"]
+        DCExport["APIExport:<br/>DependencyRule<br/><i>+ VWC permissionClaim</i>"]
     end
 
     subgraph CP["Compute Provider WS"]
-        CPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
+        CPBinding["APIBinding: dep-ctrl<br/><i>(VWC claim accepted)</i>"]
         CPExport["APIExport: compute"]
         CPRule["DependencyRule:<br/>VM → VPC"]
     end
 
     subgraph NP["Network Provider WS"]
-        NPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
+        NPBinding["APIBinding: dep-ctrl<br/><i>(VWC claim accepted)</i>"]
         NPExport["APIExport: VPCs"]
         NPWebhook["ValidatingWebhook"]
     end
 
     subgraph ROOT["Root Workspace"]
-        ROOTROLE["ClusterRoles:<br/><i>workspaces/content +<br/>workspace resolution</i>"]
+        ROOTROLE["ClusterRoles:<br/><i>workspaces/content +<br/>wildcard read (webhook)</i>"]
     end
 
     subgraph CW["Consumer WS"]
@@ -70,17 +71,21 @@ the permissionClaim).
 
 **Provider workspaces** -- each provider (compute, network, ...) exports its own
 resource types and binds to the dep-ctrl APIExport to create `DependencyRule`
-objects. The APIBinding must **accept** the dep-ctrl's permissionClaim, which
+objects. The APIBinding must **accept** the dep-ctrl's VWC permissionClaim, which
 grants the controller access to manage `ValidatingWebhookConfigurations` in
 those workspaces through the virtual workspace.
 
 **Consumer workspaces** -- bind to provider exports and create the actual
-resources (VPCs, VMs). Consumers don't interact with the dependency system directly.
+resources (VPCs, VMs). Consumers don't interact with the dependency system
+directly. The webhook queries dependent resources in consumer workspaces via
+the front-proxy using broad read RBAC.
 
 **Root workspace** -- hosts static `ClusterRoles` granting both components
 `workspaces/content` access (needed to enter child workspaces). The controller
 additionally gets `workspaces` read access to resolve workspace paths to logical
-cluster names. This is a deployment prerequisite.
+cluster names. The webhook gets wildcard read access (`get`, `list` on all
+resources) to query dependent resources in consumer workspaces. This is a
+deployment prerequisite.
 
 ## Component Overview
 
@@ -92,11 +97,11 @@ flowchart TD
     end
 
     subgraph Webhook["Webhook Server Binary (cmd/webhook)"]
-        RCM["Rule Cache Manager"]
-        RCM -->|"creates per rule"| IC["Indexed Cache<br/>(mcmanager per provider APIExport)"]
-        IC -->|"stored in"| RR["Rule Registry"]
+        RCM["Rule Registry Manager"]
+        RCM -->|"populates"| RR["Rule Registry<br/>(metadata only)"]
         DV["Deletion Validator"]
-        DV -->|"queries"| RR
+        DV -->|"queries rules"| RR
+        DV -->|"queries dependents via<br/>front-proxy per request"| CW["Consumer Workspaces"]
     end
 
     WI -->|"installs via dep-ctrl VW"| PW["Provider Workspaces"]
@@ -113,13 +118,8 @@ flowchart TD
 
 **Entry point:** [`cmd/controller/main.go`](../cmd/controller/main.go)
 
-The controller watches `DependencyRule` objects and performs two tasks:
-
-1. **PermissionClaim management** — dynamically adds permissionClaims to the
-   dep-ctrl APIExport for each dependent resource type referenced in
-   DependencyRules, so the webhook can watch those resources through the VW.
-2. **Webhook installation** — ensures `ValidatingWebhookConfiguration` objects
-   exist in the right provider workspaces.
+The controller watches `DependencyRule` objects and installs
+`ValidatingWebhookConfiguration` objects in the right provider workspaces.
 
 All operations in provider workspaces are routed through the dep-ctrl APIExport's
 virtual workspace, authorized by `permissionClaims`. The controller never connects
@@ -138,16 +138,14 @@ On first reconcile, the controller lazily initializes two components
 
 The VW only accepts logical cluster names in its `/clusters/<name>` path, not
 workspace paths. The resolver caches mappings and is consulted before every
-webhook or RBAC operation.
+webhook operation.
 
 ### How a DependencyRule becomes a webhook
 
 When a provider creates a `DependencyRule` ([`api/v1alpha1/types.go`](../api/v1alpha1/types.go)),
 the controller's reconciler
 ([`internal/controller/dependencyrule_controller.go:Reconcile`](../internal/controller/dependencyrule_controller.go))
-picks it up via the dep-ctrl APIExport's virtual workspace and performs two actions:
-
-#### 1. Webhook Installation
+picks it up via the dep-ctrl APIExport's virtual workspace and installs webhooks.
 
 The [`WebhookInstaller`](../internal/controller/webhook_installer.go) creates or
 updates a `ValidatingWebhookConfiguration` named `dependency-controller` in each
@@ -184,17 +182,18 @@ workspace, the webhook is deleted entirely.
 **Entry point:** [`cmd/webhook/main.go`](../cmd/webhook/main.go)
 
 The webhook server watches the same `DependencyRule` objects as the controller,
-but its job is different: it builds indexed caches of dependent resources and uses
-them to answer admission requests.
+but its job is different: it maintains a metadata registry of active rules and
+uses per-request direct queries to check for active dependents when a deletion
+is attempted.
 
-### Startup and Prewarming
+### Startup and Registry Population
 
 On startup, the webhook creates an `mcmanager` backed by the dep-ctrl APIExport
 provider, then registers the
 [`RuleCacheManager`](../internal/webhook/rule_cache_manager.go) as a controller
 watching `DependencyRule` objects.
 
-Before the webhook can serve requests safely, it must populate its caches from
+Before the webhook can serve requests safely, it must populate its registry with
 all existing rules. This happens in a
 [`manager.RunnableFunc`](../cmd/webhook/main.go) that runs after the manager
 starts:
@@ -202,9 +201,8 @@ starts:
 1. [`PopulateRegistry`](../internal/webhook/rule_cache_manager.go) resolves
    the dep-ctrl APIExport's virtual workspace URL from its
    `APIExportEndpointSlice`
-   ([`virtualWorkspaceClient`](../internal/webhook/rule_cache_manager.go))
 2. Lists all existing `DependencyRule` objects across all bound workspaces
-3. Calls [`ensureCache`](../internal/webhook/rule_cache_manager.go) for each rule
+3. Registers each rule's metadata (GVK, GVR, field paths) in the registry
 4. Closes the `initialized` channel
 
 Until `initialized` is closed:
@@ -212,45 +210,19 @@ Until `initialized` is closed:
   returns unhealthy
 - The `DeletionValidator` denies all DELETE requests with "not yet initialized"
 
-### Per-Rule Indexed Caches
+### Per-Request Direct Queries
 
-Each `DependencyRule` gets a dedicated `mcmanager.Manager` connected to the
-dependent resource's provider APIExport virtual workspace. This 1:1 mapping
-([`ensureCache`](../internal/webhook/rule_cache_manager.go)) exists because:
+Unlike a cache-based approach, the webhook does not maintain persistent informers
+for dependent resources. Instead, on each DELETE admission request, it constructs
+a temporary dynamic client scoped to the consumer workspace via the kcp front-proxy
+and lists dependent resources directly.
 
-- **Different rules reference different APIExports** -- each provider's virtual
-  workspace is a distinct endpoint, so each needs its own manager
-- **Clean lifecycle** -- cancelling one rule's context tears down only its
-  informers, without affecting other rules
+The webhook derives the front-proxy base URL from its kubeconfig at startup by
+stripping the `/clusters/...` workspace path suffix. For each admission request,
+it builds a workspace-scoped URL: `{frontProxyBase}/clusters/{logicalClusterName}`.
 
-For each dependency target in the rule,
-[`ensureCache`](../internal/webhook/rule_cache_manager.go) registers a field
-index on the dependent resource's informer:
-
-```go
-mgr.GetFieldIndexer().IndexField(ctx, watchObj, fieldPath, func(obj client.Object) []string {
-    val := fieldpath.Resolve(u.Object, fieldPath)  // e.g., ".spec.vpcRef.name" -> "my-vpc"
-    return []string{val}
-})
-```
-
-This enables O(1) lookups: "find all VMs whose `.spec.vpcRef.name` equals `my-vpc`".
-
-A minimal controller is registered on the same GVK to activate the informer
-(controller-runtime won't start an informer without a controller watching it)
-and to track which logical clusters have been discovered and mark the cache
-as ready.
-
-The resulting state is stored in the
-[`RuleRegistry`](../internal/webhook/rule_registry.go) as a `RuleState` keyed by
-`clusterName/ruleName`. The registry also maintains a reverse index
-(`byTarget map[GVR][]string`) so the webhook can quickly find which rules
-protect a given resource type.
-
-On `DependencyRule` deletion, `Reconcile` calls
-[`Registry.Unregister(key)`](../internal/webhook/rule_registry.go) which removes
-the state from the map and calls `state.Cancel()` to stop the background manager
-goroutine and tear down all informers.
+This approach is shard-transparent -- adding new kcp shards requires no changes
+to the webhook configuration, as the front-proxy handles routing automatically.
 
 ### Admission Request Flow
 
@@ -275,24 +247,25 @@ DELETE vpcs/my-vpc (from consumer workspace)
 6. Registry.FindByTargetGVR(vpcs GVR)
    |  returns []RuleEntry with matched IndexedFields
    |
-7. For each matching rule:
-   |  a. Cache not ready? --> Deny ("cache warming up, retry later")
-   |  b. Get cluster from rule's manager
-   |  c. Query: cache.List(ctx, &list, MatchingFields{".spec.vpcRef.name": "my-vpc"})
-   |  d. Each result is a blocker: "VirtualMachine/my-vm"
+7. Create dynamic client for {frontProxy}/clusters/{clusterName}
    |
-8. Blockers found? --> Deny ("still referenced by VirtualMachine/my-vm")
+8. For each matching rule:
+   |  a. List dependent resources in namespace
+   |  b. Filter by field path (fieldpath.Resolve == deleted resource name)
+   |  c. Each match is a blocker: "VirtualMachine/my-vm"
    |
-9. No blockers --> Allow
+9. Blockers found? --> Deny ("still referenced by VirtualMachine/my-vm")
+   |
+10. No blockers --> Allow
 ```
 
 The validator is rule-agnostic -- it doesn't need to know the structure of each
-`DependencyRule`, only how to query the indexed caches via the field paths stored
-in `RuleEntry.MatchedField`.
+`DependencyRule`, only how to query the dependent resources via the GVR and field
+paths stored in `RuleEntry`.
 
 ### Force-Deleting Protected Resources
 
-If the dependency lifecycle has broken down (stale caches, crashed webhook),
+If the dependency lifecycle has broken down (stale rules, crashed webhook),
 operators can bypass protection:
 
 ```sh
@@ -321,6 +294,7 @@ spec:
     group: compute.test.io
     version: v1
     kind: VirtualMachine
+    resource: virtualmachines
   dependencies:
     - apiExportRef:
         path: "root:network-provider"
@@ -332,14 +306,15 @@ spec:
         path: ".spec.vpcRef.name"
 ```
 
-`spec.dependent` -- the resource type that holds references (the one being cached).
+`spec.dependent` -- the resource type that holds references (the one queried on deletion).
 `spec.dependent.apiExportName` -- the APIExport in the same workspace that provides this type.
+`spec.dependent.resource` -- the plural resource name, used to construct the GVR for dynamic client queries.
 `spec.dependencies[]` -- the resource types being referenced (the ones being protected).
 `spec.dependencies[].fieldRef.path` -- where in the dependent resource the reference lives.
 
 ### RuleRegistry (`internal/webhook/rule_registry.go`)
 
-Thread-safe store shared between the `RuleCacheManager` (writer) and
+Thread-safe metadata store shared between the `RuleCacheManager` (writer) and
 `DeletionValidator` (reader).
 
 - `rules map[string]*RuleState` -- keyed by `clusterName/ruleName`
@@ -347,15 +322,16 @@ Thread-safe store shared between the `RuleCacheManager` (writer) and
   rebuilt on every `Register`/`Unregister`
 
 Key operations:
-- `Register(key, state) *RuleState` -- adds/replaces a rule, returns old state for cleanup
-- `Unregister(key)` -- removes and cancels the rule's manager
+- `Register(key, state) *RuleState` -- adds/replaces a rule, returns old state
+- `Unregister(key)` -- removes the rule
 - `FindByTargetGVR(gvr) []RuleEntry` -- O(1) lookup used by the admission handler
 
 ### Field Path Resolution (`internal/fieldpath/fieldpath.go`)
 
 [`fieldpath.Resolve`](../internal/fieldpath/fieldpath.go) extracts a string value
 from an unstructured object given a dot-notation path (e.g., `.spec.vpcRef.name`).
-Used by the index functions registered on per-rule informers.
+Used by the webhook to filter dependent resources by matching field values against
+the deleted resource name.
 
 ---
 
@@ -367,16 +343,15 @@ The system does not detect cycles. If rule A says VM depends on VPC and rule B
 says VPC depends on VM, neither can be deleted normally. Use `skip-protection`
 to break the cycle.
 
-### Informer cache lag
+### Per-request query latency
 
-Between a dependent being created and the informer cache syncing (typically
-sub-second), the referenced resource can be deleted without the webhook blocking
-it. Similarly, after a dependent is deleted, there's a brief window where the
-webhook may still block deletion of the referenced resource.
+Each DELETE admission request triggers a live API call to list dependent resources
+in the consumer workspace. This adds latency compared to a cache-based approach,
+but DELETE operations are infrequent and the namespace-scoped listings are
+typically small.
 
 ### Rule updates are not detected
 
-[`ensureCache`](../internal/webhook/rule_cache_manager.go) is a no-op if a
-cache already exists for the rule key. If a `DependencyRule`'s spec changes
-(e.g., a new dependency target is added), the existing cache won't be updated.
-The workaround is to delete and recreate the rule.
+`registerRule` overwrites an existing registry entry if the key already exists.
+However, if a `DependencyRule`'s spec changes, the webhook will pick up the new
+metadata on the next reconcile event. No manual intervention is needed.

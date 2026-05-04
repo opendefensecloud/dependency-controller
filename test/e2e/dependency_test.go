@@ -30,24 +30,6 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		By("creating a DependencyRule in the compute-provider workspace")
 		applyFixtureToWS(wsComputeProvider, filepath.Join(fixturesDir, "dependencyrule-vm-dependencies.yaml"), subs)
 
-		By("waiting for the controller to add permissionClaim for dependent resource type")
-		waitFor(time.Minute, "permissionClaim for compute.test.io/virtualmachines added", func() error {
-			out, err := kcpctlNoFail(wsDepCtrl, "get", "apiexport", "dependencies.opendefense.cloud",
-				"-o", "jsonpath={.spec.permissionClaims}")
-			if err != nil {
-				return err
-			}
-			if !strings.Contains(out, "virtualmachines") {
-				return fmt.Errorf("permissionClaim for virtualmachines not yet present: %s", out)
-			}
-
-			return nil
-		})
-
-		By("accepting the dependent resource permissionClaim in provider bindings")
-		acceptPermissionClaim(wsComputeProvider, "dependencies.opendefense.cloud",
-			"compute.test.io", "virtualmachines")
-
 		By("creating a VM referencing the VPC in consumer1")
 		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-my-vm.yaml"), nil)
 
@@ -239,22 +221,6 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 
 		By("recreating the DependencyRule")
 		applyFixtureToWS(wsComputeProvider, filepath.Join(fixturesDir, "dependencyrule-vm-dependencies.yaml"), subs)
-
-		By("re-accepting the dependent resource permissionClaim after rule recreation")
-		waitFor(time.Minute, "permissionClaim re-added", func() error {
-			out, err := kcpctlNoFail(wsDepCtrl, "get", "apiexport", "dependencies.opendefense.cloud",
-				"-o", "jsonpath={.spec.permissionClaims}")
-			if err != nil {
-				return err
-			}
-			if !strings.Contains(out, "virtualmachines") {
-				return fmt.Errorf("permissionClaim not yet present: %s", out)
-			}
-
-			return nil
-		})
-		acceptPermissionClaim(wsComputeProvider, "dependencies.opendefense.cloud",
-			"compute.test.io", "virtualmachines")
 
 		By("waiting for webhook to be reinstalled in network-provider")
 		waitFor(time.Minute, "webhook reinstalled in network-provider", func() error {

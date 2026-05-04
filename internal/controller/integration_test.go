@@ -230,19 +230,8 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 			Complete(mcreconcile.Func(ruleReconciler.Reconcile))
 		Expect(err).NotTo(HaveOccurred())
 
-		// Wire up the permissionClaim reconciler.
-		claimReconciler := &controller.PermissionClaimReconciler{
-			DepCtrlManager: mgr,
-			APIExportName:  "dependencies.opendefense.cloud",
-		}
-		err = mcbuilder.ControllerManagedBy(mgr).
-			Named("permissionclaim").
-			For(&v1alpha1.DependencyRule{}).
-			Complete(mcreconcile.Func(claimReconciler.Reconcile))
-		Expect(err).NotTo(HaveOccurred())
-
 		// Wire up the webhook handler with the rule registry.
-		webhookHandler = &depwebhook.DeletionValidator{Registry: registry, Initialized: initialized}
+		webhookHandler = &depwebhook.DeletionValidator{Registry: registry, Initialized: initialized, BaseConfig: kcpConfig}
 
 		// Start the manager.
 		go func() {

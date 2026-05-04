@@ -16,7 +16,7 @@ spec:
   resources:
   - group: dependencies.opendefense.cloud
     name: dependencyrules
-    schema: v260501-c39e4ab.dependencyrules.dependencies.opendefense.cloud
+    schema: v260504-f130a11.dependencyrules.dependencies.opendefense.cloud
     storage:
       crd: {}
 status: {}

@@ -59,8 +59,7 @@ type DependentRef struct {
 	Kind string `json:"kind"`
 
 	// Resource is the plural resource name of the dependent (e.g., "virtualmachines").
-	// Used to build permissionClaims on the dep-ctrl APIExport so the webhook can
-	// watch dependent resources through the virtual workspace.
+	// Used by the webhook to construct the GVR for listing dependent resources.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9]*$`

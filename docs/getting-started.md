@@ -295,6 +295,11 @@ additionally needs to read `Workspace` objects to resolve workspace paths
 (like `root:network-provider`) to the logical cluster names that the virtual
 workspace requires.
 
+The webhook needs **wildcard read access** (`get`, `list` on all resources)
+in the root workspace. When the webhook enters a consumer workspace via
+`workspaces/content`, this RBAC grants it permission to list dependent
+resources (e.g., VirtualMachines) directly in that workspace.
+
 ```sh
 kubectl ws root
 kubectl apply -f test/fixtures/root-rbac-bootstrap.yaml
@@ -314,15 +319,27 @@ The file
 ([`test/fixtures/depctrl-rbac-bootstrap.yaml`](../test/fixtures/depctrl-rbac-bootstrap.yaml))
 grants both the controller and webhook SAs:
 - `apiexportendpointslices` read access (for VW URL discovery at startup)
-- `apiexports` get/update (for the controller to manage permissionClaims)
 - `apiexports/content` full CRUD (for managing resources through the VW)
 
-**No shard-wide RBAC is needed.** The webhook watches dependent resources
-through the dep-ctrl APIExport's virtual workspace, authorized by dynamically
-managed permissionClaims. The controller automatically adds permissionClaims
-to the dep-ctrl APIExport for each dependent resource type referenced by a
-DependencyRule. Provider workspaces must accept these claims in their
-APIBinding (see Step 6).
+### Consumer workspace RBAC
+
+The webhook queries dependent resources directly in consumer workspaces via
+the kcp front-proxy. Each consumer workspace needs a `ClusterRole` and
+`ClusterRoleBinding` granting the webhook's service account `get` and `list`
+access on all resources:
+
+```sh
+# Apply to each consumer workspace
+kubectl ws root:consumer1
+kubectl apply -f test/fixtures/consumer-rbac-bootstrap.yaml
+
+kubectl ws root:consumer2
+kubectl apply -f test/fixtures/consumer-rbac-bootstrap.yaml
+```
+
+The file
+([`test/fixtures/consumer-rbac-bootstrap.yaml`](../test/fixtures/consumer-rbac-bootstrap.yaml))
+grants the webhook SA wildcard read access within that workspace.
 
 ### Adjusting service account names
 
@@ -429,7 +446,6 @@ service URL and TLS CA from the co-deployed resources.
 ```sh
 helm install dep-ctrl charts/dependency-controller \
   --namespace dependency-system --create-namespace \
-  --set kcpBaseHost=https://<front-proxy-host>:<port> \
   --set controller.kubeconfig.secretName=kcp-controller-kubeconfig \
   --set webhook.kubeconfig.secretName=kcp-webhook-kubeconfig \
   --set webhook.tls.certManager.issuerRef.name=selfsigned
@@ -439,10 +455,14 @@ Key values:
 
 | Value | Purpose |
 |---|---|
-| `kcpBaseHost` | Root kcp URL (no workspace path). Used by the controller to resolve workspace paths and by the webhook for provider ESS discovery. |
 | `controller.kubeconfig.secretName` | Secret containing the controller's kubeconfig (from Step 4). |
 | `webhook.kubeconfig.secretName` | Secret containing the webhook's kubeconfig (from Step 4). |
 | `webhook.tls.certManager.issuerRef.name` | cert-manager issuer for the webhook's TLS certificate. |
+
+Both components automatically derive the kcp front-proxy base URL from their
+kubeconfig by stripping the `/clusters/...` workspace path suffix. No
+additional base URL flag is needed (though `kcpBaseHost` can be set to
+override this if your kubeconfig host doesn't follow the standard pattern).
 
 See [`charts/dependency-controller/values.yaml`](../charts/dependency-controller/values.yaml)
 for all available options.
@@ -555,12 +575,6 @@ A reference fixture is available at
 The accepted permissionClaim grants the controller permission to create
 `ValidatingWebhookConfigurations` in the workspace (for deletion protection).
 
-When a DependencyRule is created, the controller automatically adds
-permissionClaims for the dependent resource type (e.g., `virtualmachines`) to
-the dep-ctrl APIExport. Provider workspaces must accept these additional claims
-in their APIBinding for the webhook to watch dependent resources through the
-virtual workspace.
-
 ### 6c. Create a DependencyRule
 
 The compute provider declares that VirtualMachines depend on VPCs:
@@ -595,12 +609,9 @@ A reference fixture is available at
 [`test/fixtures/dependencyrule-vm-dependencies.yaml`](../test/fixtures/dependencyrule-vm-dependencies.yaml).
 
 Once applied, the controller will install a `ValidatingWebhookConfiguration`
-in `root:network-provider` (protecting VPC deletions).
-
-The webhook will:
-1. Start an indexed cache watching VirtualMachines via the dep-ctrl APIExport VW
-   (authorized by the accepted `virtualmachines` permissionClaim)
-2. Begin serving admission requests for VPC deletions
+in `root:network-provider` (protecting VPC deletions). The webhook registers
+the rule's metadata in its registry and begins serving admission requests
+for VPC deletions.
 
 ### 6d. Create a consumer workspace and test resources
 
@@ -685,36 +696,39 @@ Here's the flow that makes Step 6e work:
    `<vw-url>/clusters/<logical-cluster-name>` and creates a
    `ValidatingWebhookConfiguration` in the network-provider workspace
    (authorized by the accepted `validatingwebhookconfigurations` permissionClaim)
-4. The **webhook** also watches the same DependencyRule and starts an indexed
-   cache watching VirtualMachines via the dep-ctrl APIExport VW (authorized by
-   the accepted `virtualmachines` permissionClaim)
+4. The **webhook** also watches the same DependencyRule and registers the rule's
+   metadata (dependent GVR, field paths, target GVR) in its in-memory registry
 5. When a consumer deletes a VPC, kcp dispatches the DELETE to the webhook
    (via the installed `ValidatingWebhookConfiguration`)
-6. The webhook queries its indexed cache: "any VMs where `.spec.vpcRef.name`
-   equals `my-vpc`?" -- finds `my-vm` and denies the deletion
+6. The webhook extracts the logical cluster name from the `kcp.io/cluster`
+   annotation on the object, constructs a temporary dynamic client scoped to
+   `{frontProxy}/clusters/{clusterName}`, and lists VirtualMachines in that
+   namespace
+7. It filters by field path: "any VMs where `.spec.vpcRef.name` equals
+   `my-vpc`?" -- finds `my-vm` and denies the deletion
 
 ## Multi-shard considerations
 
-The dependency-controller is fully multi-shard aware:
+The dependency-controller is fully multi-shard aware. Adding new shards
+requires **zero changes** to the dependency-controller configuration:
 
 - **Webhook installation**: The controller installs webhooks via the dep-ctrl
   APIExport's virtual workspace, which automatically routes to the correct
   shard for each provider workspace.
 
-- **Indexed caches**: The webhook discovers provider APIExport VW URLs from
-  `APIExportEndpointSlice` objects, which list endpoints per shard. Caches
-  span all shards automatically.
+- **Per-request queries**: The webhook queries dependent resources via the kcp
+  front-proxy, which transparently routes requests to the correct shard based
+  on the logical cluster name. No shard-specific configuration is needed.
 
-- **RBAC**: No per-shard RBAC is needed. All access goes through the dep-ctrl
-  APIExport's virtual workspace, which handles shard routing automatically.
+- **RBAC**: No per-shard RBAC is needed. The controller accesses provider
+  workspaces through the dep-ctrl virtual workspace. The webhook accesses
+  consumer workspaces through the front-proxy, authorized by `workspaces/content`
+  RBAC in the root workspace and wildcard read RBAC in consumer workspaces.
 
 - **Kubeconfigs**: Component kubeconfigs must use certificates signed by
   `root-client-ca` (via `rootShardRef` in the Kubeconfig CR). This CA is
   trusted by both the front-proxy and all shards, which is required because
   VW URLs point directly at shards.
-
-When adding a new shard to your kcp cluster, no additional RBAC configuration
-is needed — the dep-ctrl virtual workspace automatically routes to new shards.
 
 ## Troubleshooting
 
@@ -730,8 +744,8 @@ kubectl -n dependency-system logs -l app.kubernetes.io/component=webhook
 Common issues:
 - **Kubeconfig invalid** -- the webhook can't reach kcp
 - **Missing RBAC** -- ensure the dep-ctrl workspace RBAC from Step 3 is applied
-- **PermissionClaims not accepted** -- provider APIBindings must accept the
-  dependent resource permissionClaims (Step 6c)
+- **Missing consumer RBAC** -- ensure consumer workspaces have the webhook
+  read RBAC from Step 3 applied
 - **Certificate not trusted by shards** -- ensure kubeconfigs use `rootShardRef`
   (not `frontProxyRef`) so certs are signed by `root-client-ca`
 
@@ -753,8 +767,8 @@ kubectl get apibinding dependencies.opendefense.cloud -o jsonpath='{.status.phas
 ### Controller can't create webhooks
 
 Check that the provider workspace's APIBinding has accepted the
-permissionClaims (Step 6b). Without acceptance, the VW rejects write
-operations:
+`validatingwebhookconfigurations` permissionClaim (Step 6b). Without
+acceptance, the VW rejects write operations:
 
 ```sh
 kubectl ws root:network-provider
@@ -764,7 +778,7 @@ kubectl get apibinding dependencies.opendefense.cloud -o yaml
 
 ### Force-deleting a protected resource
 
-If the webhook is down or caches are stale, annotate the resource to bypass
+If the webhook is down or rules are stale, annotate the resource to bypass
 protection:
 
 ```sh

@@ -42,6 +42,11 @@ rules:
   - apiGroups: ["core.kcp.io"]
     resources: ["workspaces/content"]
     verbs: ["access"]
+  # Read all resources in consumer workspaces for dependency checking.
+  # The webhook queries dependent resources directly in each workspace.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

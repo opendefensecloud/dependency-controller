@@ -1,0 +1,25 @@
+# RBAC in consumer workspaces for the dependency-controller webhook.
+# Applied during setup so the webhook can list dependent resources
+# directly in consumer workspaces when checking deletion protection.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dependency-controller-webhook
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dependency-controller-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dependency-controller-webhook
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "system:serviceaccount:dependency-system:dependency-webhook"

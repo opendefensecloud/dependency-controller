@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260501-c39e4ab.dependencyrules.dependencies.opendefense.cloud
+  name: v260504-f130a11.dependencyrules.dependencies.opendefense.cloud
 spec:
   group: dependencies.opendefense.cloud
   names:
@@ -137,8 +137,7 @@ spec:
                 resource:
                   description: |-
                     Resource is the plural resource name of the dependent (e.g., "virtualmachines").
-                    Used to build permissionClaims on the dep-ctrl APIExport so the webhook can
-                    watch dependent resources through the virtual workspace.
+                    Used by the webhook to construct the GVR for listing dependent resources.
                   maxLength: 63
                   minLength: 1
                   pattern: ^[a-z][a-z0-9]*$

@@ -7,32 +7,26 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 )
 
 // RuleRegistry is a thread-safe registry of active DependencyRules and their
-// associated multicluster managers. It maintains a reverse index from dependency
-// target GVRs to rule keys, enabling the webhook to quickly find which rules
-// protect a given resource type.
+// metadata. It maintains a reverse index from dependency target GVRs to rule
+// keys, enabling the webhook to quickly find which rules protect a given
+// resource type.
 type RuleRegistry struct {
 	mu       sync.RWMutex
 	rules    map[string]*RuleState
 	byTarget map[schema.GroupVersionResource][]string // GVR -> rule keys
 }
 
-// RuleState holds the runtime state for a single DependencyRule.
+// RuleState holds the metadata for a single DependencyRule.
 type RuleState struct {
-	Manager      mcmanager.Manager
-	Cancel       func()
 	Rule         v1alpha1.DependencyRuleSpec
 	DependentGVK schema.GroupVersionKind
+	DependentGVR schema.GroupVersionResource
 	IndexFields  []IndexedField
-	Ready        bool
-
-	mu            sync.Mutex
-	knownClusters map[string]struct{}
 }
 
 // IndexedField maps a field path on the dependent resource to the dependency
@@ -59,7 +53,7 @@ func NewRuleRegistry() *RuleRegistry {
 
 // Register adds a rule to the registry and rebuilds the reverse index.
 // If a state was already registered under this key, it is replaced and
-// the old state is returned so the caller can clean it up.
+// the old state is returned so the caller can detect duplicates.
 func (r *RuleRegistry) Register(key string, state *RuleState) *RuleState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -71,21 +65,17 @@ func (r *RuleRegistry) Register(key string, state *RuleState) *RuleState {
 	return old
 }
 
-// Unregister removes a rule from the registry, cancels its manager, and
-// rebuilds the reverse index.
+// Unregister removes a rule from the registry and rebuilds the reverse index.
 func (r *RuleRegistry) Unregister(key string) {
 	r.mu.Lock()
-	state, exists := r.rules[key]
-	if !exists {
-		r.mu.Unlock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.rules[key]; !exists {
 		return
 	}
+
 	delete(r.rules, key)
 	r.rebuildTargetIndex()
-	r.mu.Unlock()
-
-	// Cancel outside the lock to avoid holding it during teardown.
-	state.Cancel()
 }
 
 // Exists returns true if the given rule key is registered.
@@ -159,42 +149,4 @@ func (r *RuleRegistry) rebuildTargetIndex() {
 			r.byTarget[f.TargetGVR] = append(r.byTarget[f.TargetGVR], key)
 		}
 	}
-}
-
-// TrackCluster records that the given rule has seen a resource in the given cluster.
-func (r *RuleRegistry) TrackCluster(key, clusterName string) {
-	r.mu.RLock()
-	state := r.rules[key]
-	r.mu.RUnlock()
-	if state == nil {
-		return
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.knownClusters == nil {
-		state.knownClusters = make(map[string]struct{})
-	}
-	state.knownClusters[clusterName] = struct{}{}
-}
-
-// IsReady returns true if the rule's cache is synced and ready for queries.
-func (s *RuleState) IsReady() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.Ready
-}
-
-// MarkReady marks a rule's cache as synced and ready for queries.
-func (r *RuleRegistry) MarkReady(key string) {
-	r.mu.RLock()
-	state := r.rules[key]
-	r.mu.RUnlock()
-	if state == nil {
-		return
-	}
-
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	state.Ready = true
 }

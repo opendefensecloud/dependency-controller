@@ -152,18 +152,6 @@ func kcpctlRootNoFail(args ...string) (string, error) {
 	}, args...)...)
 }
 
-// acceptPermissionClaim patches an APIBinding in the given workspace to accept
-// a dynamically added permissionClaim for the specified group and resource.
-func acceptPermissionClaim(wsPath, bindingName, group, resource string) {
-	GinkgoHelper()
-	// Use kubectl patch to add the accepted claim to the binding's permissionClaims list.
-	patch := fmt.Sprintf(`[{"op":"add","path":"/spec/permissionClaims/-","value":{"group":%q,"resource":%q,"verbs":["get","list","watch"],"selector":{"matchAll":true},"state":"Accepted"}}]`,
-		group, resource)
-	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsPath),
-		"patch", "apibinding", bindingName, "--type=json", "-p", patch)
-}
-
 // applyFixtureToWS applies a YAML fixture to a kcp workspace with placeholder substitution.
 func applyFixtureToWS(wsPath, file string, substitutions map[string]string) {
 	GinkgoHelper()
@@ -798,6 +786,13 @@ func bootstrapRBAC() {
 		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsDepCtrl),
 		"apply", "-f", filepath.Join(fixturesDir, "depctrl-rbac-bootstrap.yaml"))
 
+	// Apply RBAC in consumer workspaces so the webhook can list dependent
+	// resources directly when checking deletion protection.
+	for _, ws := range []string{wsConsumer1, wsConsumer2} {
+		run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
+			"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, ws),
+			"apply", "-f", filepath.Join(fixturesDir, "consumer-rbac-bootstrap.yaml"))
+	}
 }
 
 // extractServerFromKubeconfig extracts the server URL from a kubeconfig YAML.

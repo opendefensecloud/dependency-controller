@@ -20,7 +20,6 @@ func TestRuleRegistry_RegisterAndFind(t *testing.T) {
 	subnetGVR := schema.GroupVersionResource{Group: "network.test.io", Version: "v1", Resource: "subnets"}
 
 	state := &RuleState{
-		Cancel: func() {},
 		Rule: v1alpha1.DependencyRuleSpec{
 			Dependent: v1alpha1.DependentRef{
 				Group:    "compute.test.io",
@@ -30,6 +29,7 @@ func TestRuleRegistry_RegisterAndFind(t *testing.T) {
 			},
 		},
 		DependentGVK: schema.GroupVersionKind{Group: "compute.test.io", Version: "v1", Kind: "VirtualMachine"},
+		DependentGVR: schema.GroupVersionResource{Group: "compute.test.io", Version: "v1", Resource: "virtualmachines"},
 		IndexFields: []IndexedField{
 			{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR},
 			{FieldPath: ".spec.subnetRef.name", TargetGVR: subnetGVR},
@@ -64,10 +64,8 @@ func TestRuleRegistry_Unregister(t *testing.T) {
 	r := NewRuleRegistry()
 
 	vpcGVR := schema.GroupVersionResource{Group: "network.test.io", Version: "v1", Resource: "vpcs"}
-	cancelled := false
 
 	state := &RuleState{
-		Cancel: func() { cancelled = true },
 		IndexFields: []IndexedField{
 			{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR},
 		},
@@ -75,10 +73,6 @@ func TestRuleRegistry_Unregister(t *testing.T) {
 
 	r.Register("cluster1/vm-deps", state)
 	r.Unregister("cluster1/vm-deps")
-
-	if !cancelled {
-		t.Error("expected cancel to be called")
-	}
 
 	entries := r.FindByTargetGVR(vpcGVR)
 	if len(entries) != 0 {
@@ -96,11 +90,9 @@ func TestRuleRegistry_MultipleRulesSameTarget(t *testing.T) {
 	vpcGVR := schema.GroupVersionResource{Group: "network.test.io", Version: "v1", Resource: "vpcs"}
 
 	state1 := &RuleState{
-		Cancel:      func() {},
 		IndexFields: []IndexedField{{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR}},
 	}
 	state2 := &RuleState{
-		Cancel:      func() {},
 		IndexFields: []IndexedField{{FieldPath: ".spec.networkRef.vpc", TargetGVR: vpcGVR}},
 	}
 
@@ -123,44 +115,6 @@ func TestRuleRegistry_MultipleRulesSameTarget(t *testing.T) {
 	}
 }
 
-func TestRuleRegistry_TrackCluster(t *testing.T) {
-	r := NewRuleRegistry()
-
-	state := &RuleState{
-		Cancel: func() {},
-	}
-	r.Register("cluster1/rule", state)
-
-	r.TrackCluster("cluster1/rule", "consumer-ws-1")
-	r.TrackCluster("cluster1/rule", "consumer-ws-2")
-	r.TrackCluster("cluster1/rule", "consumer-ws-1") // duplicate
-
-	state.mu.Lock()
-	count := len(state.knownClusters)
-	state.mu.Unlock()
-
-	if count != 2 {
-		t.Errorf("expected 2 known clusters, got %d", count)
-	}
-}
-
-func TestRuleRegistry_MarkReady(t *testing.T) {
-	r := NewRuleRegistry()
-
-	state := &RuleState{Cancel: func() {}}
-	r.Register("c1/rule", state)
-
-	if state.IsReady() {
-		t.Error("expected Ready=false initially")
-	}
-
-	r.MarkReady("c1/rule")
-
-	if !state.IsReady() {
-		t.Error("expected Ready=true after MarkReady")
-	}
-}
-
 func TestRuleRegistry_UnregisterNonexistent(t *testing.T) {
 	r := NewRuleRegistry()
 	// Should not panic.
@@ -174,11 +128,9 @@ func TestRuleRegistry_AllTargetGVRs(t *testing.T) {
 	subnetGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "subnets"}
 
 	r.Register("c1/rule1", &RuleState{
-		Cancel:      func() {},
 		IndexFields: []IndexedField{{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR}},
 	})
 	r.Register("c1/rule2", &RuleState{
-		Cancel: func() {},
 		IndexFields: []IndexedField{
 			{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR},
 			{FieldPath: ".spec.subnetRef.name", TargetGVR: subnetGVR},
@@ -198,18 +150,6 @@ func TestRuleRegistry_GetNil(t *testing.T) {
 	}
 }
 
-func TestRuleRegistry_MarkReadyNonexistent(t *testing.T) {
-	r := NewRuleRegistry()
-	// Should not panic.
-	r.MarkReady("nonexistent")
-}
-
-func TestRuleRegistry_TrackClusterNonexistent(t *testing.T) {
-	r := NewRuleRegistry()
-	// Should not panic.
-	r.TrackCluster("nonexistent", "cluster1")
-}
-
 func TestRuleRegistry_ConcurrentAccess(t *testing.T) {
 	r := NewRuleRegistry()
 	vpcGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "vpcs"}
@@ -226,10 +166,9 @@ func TestRuleRegistry_ConcurrentAccess(t *testing.T) {
 			key := fmt.Sprintf("cluster%d/rule%d", id%5, id)
 
 			for j := range opsPerGoroutine {
-				switch j % 7 {
+				switch j % 5 {
 				case 0:
 					r.Register(key, &RuleState{
-						Cancel:      func() {},
 						IndexFields: []IndexedField{{FieldPath: ".spec.ref", TargetGVR: vpcGVR}},
 						Rule: v1alpha1.DependencyRuleSpec{
 							Dependent: v1alpha1.DependentRef{Group: "compute.io", Version: "v1", Kind: "VM", Resource: "vms"},
@@ -242,10 +181,6 @@ func TestRuleRegistry_ConcurrentAccess(t *testing.T) {
 				case 3:
 					r.Get(key)
 				case 4:
-					r.TrackCluster(key, fmt.Sprintf("consumer-%d", j))
-				case 5:
-					r.MarkReady(key)
-				case 6:
 					r.AllTargetGVRs()
 				}
 			}
@@ -274,7 +209,6 @@ func TestRuleRegistry_RegisterOverwrite(t *testing.T) {
 	subnetGVR := schema.GroupVersionResource{Group: "net.io", Version: "v1", Resource: "subnets"}
 
 	oldState := &RuleState{
-		Cancel:      func() {},
 		IndexFields: []IndexedField{{FieldPath: ".spec.vpcRef.name", TargetGVR: vpcGVR}},
 	}
 	old := r.Register("c1/rule", oldState)
@@ -284,7 +218,6 @@ func TestRuleRegistry_RegisterOverwrite(t *testing.T) {
 
 	// Overwrite with new state targeting a different GVR.
 	old = r.Register("c1/rule", &RuleState{
-		Cancel:      func() {},
 		IndexFields: []IndexedField{{FieldPath: ".spec.subnetRef.name", TargetGVR: subnetGVR}},
 	})
 	if old != oldState {
@@ -306,7 +239,7 @@ func TestRuleRegistry_RegisterOverwrite(t *testing.T) {
 
 func TestRuleRegistry_RegisterFirstReturnsNil(t *testing.T) {
 	r := NewRuleRegistry()
-	old := r.Register("c1/rule", &RuleState{Cancel: func() {}})
+	old := r.Register("c1/rule", &RuleState{})
 	if old != nil {
 		t.Error("expected nil when registering a new key")
 	}

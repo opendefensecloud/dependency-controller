@@ -5,9 +5,7 @@
 # 1. Discover the VW URL via APIExportEndpointSlice
 # 2. Access the dep-ctrl APIExport's virtual workspace (apiexports/content)
 #
-# The controller additionally manages permissionClaims on the APIExport
-# (to dynamically claim dependent resource types) and manages webhooks
-# in binding workspaces via the VW.
+# The controller manages webhooks in binding workspaces via the VW.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -17,10 +15,6 @@ rules:
   - apiGroups: ["apis.kcp.io"]
     resources: ["apiexportendpointslices"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["apis.kcp.io"]
-    resources: ["apiexports"]
-    resourceNames: ["dependencies.opendefense.cloud"]
-    verbs: ["get", "update"]
   - apiGroups: ["apis.kcp.io"]
     resources: ["apiexports/content"]
     resourceNames: ["dependencies.opendefense.cloud"]

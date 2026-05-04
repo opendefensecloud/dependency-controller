@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"strings"
 
 	"github.com/kcp-dev/multicluster-provider/apiexport"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -58,6 +60,14 @@ func main() {
 	setupLog := ctrl.Log.WithName("setup")
 
 	cfg := ctrl.GetConfigOrDie()
+
+	// Derive front-proxy base config by stripping the /clusters/... workspace
+	// path from the kubeconfig host. This base URL is used by the webhook to
+	// construct per-request clients targeting specific consumer workspaces.
+	baseCfg := rest.CopyConfig(cfg)
+	if idx := strings.Index(baseCfg.Host, "/clusters/"); idx != -1 {
+		baseCfg.Host = baseCfg.Host[:idx]
+	}
 
 	// Resolve the APIExportEndpointSlice name for the dep-ctrl's APIExport.
 	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
@@ -144,6 +154,7 @@ func main() {
 	validator := &webhook.DeletionValidator{
 		Registry:    registry,
 		Initialized: initialized,
+		BaseConfig:  baseCfg,
 	}
 	mgr.GetWebhookServer().Register("/validate", &ctrlwebhook.Admission{Handler: validator})
 
