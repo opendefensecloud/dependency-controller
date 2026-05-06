@@ -65,26 +65,31 @@ The deployment has six phases:
 6. **Provider onboarding** -- providers bind to the dep-ctrl APIExport and
    create DependencyRules
 
-```
+```text
 Management Cluster (kind)            kcp (via kcp-operator)
 +-------------------------------+    +----------------------------------+
 | kcp-operator                  |    | root shard                       |
-| etcd (one per shard)          |    |   root workspace                 |
-| root-kcp (root shard pod)     |    |     ClusterRoles for both SAs    |
-| shard1-kcp (shard1 pod)       |    |   root:dep-ctrl workspace        |
-| kcp-front-proxy               |    |     APIExport: DependencyRule    |
-|                               |    |     ClusterRoles for both SAs    |
-| dependency-controller pod     |    |   root:compute-provider          |
-|   reads Workspace objects     |--->|     APIExport: VMs               |
-|   manages webhooks via VW     |    |     DependencyRule: VM -> VPC    |
-|                               |    |   root:network-provider          |
-| dependency-webhook pod        |    |     APIExport: VPCs              |
-|   watches rules via VW        |--->|     ValidatingWebhook (installed |
-|   serves admission requests   |    |       by controller via VW)      |
-+-------------------------------+    |                                  |
+| etcd (one per shard)          |    |   system:admin (per-shard)       |
+| root-kcp (root shard pod)     |    |     ClusterRoleBinding for       |
+| shard1-kcp (shard1 pod)       |    |       webhook SA (wildcard read) |
+| kcp-front-proxy               |    |   root workspace                 |
+|                               |    |     ClusterRole for controller   |
+| dependency-controller pod     |    |   root:dep-ctrl workspace        |
+|   reads Workspace objects     |--->|     APIExport: DependencyRule    |
+|   manages webhooks via VW     |    |     ClusterRoles for both SAs    |
+|                               |    |   root:compute-provider          |
+| dependency-webhook pod        |    |     APIExport: VMs               |
+|   watches rules via VW        |    |     DependencyRule: VM -> VPC    |
+|   serves admission requests   |--->|   root:network-provider          |
++-------------------------------+    |     APIExport: VPCs              |
+                                     |     ValidatingWebhook (installed |
+                                     |       by controller via VW)      |
+                                     |                                  |
                                      | shard1                           |
-                                     |   consumer2 workspace            |
-                                     |     (may be on any shard)        |
+                                     |   system:admin (per-shard)       |
+                                     |     same webhook binding as root |
+                                     |   (consumer workspaces may live  |
+                                     |    on any shard)                 |
                                      +----------------------------------+
 ```
 
@@ -289,21 +294,18 @@ kubeconfig.
 
 ### Root workspace RBAC
 
-Both components need `workspaces/content` access to enter child workspaces
-(this is how kcp authorizes traversing the workspace hierarchy). The controller
-additionally needs to read `Workspace` objects to resolve workspace paths
-(like `root:network-provider`) to the logical cluster names that the virtual
-workspace requires.
-
-The webhook needs **wildcard read access** (`get`, `list` on all resources)
-in the root workspace. When the webhook enters a consumer workspace via
-`workspaces/content`, this RBAC grants it permission to list dependent
-resources (e.g., VirtualMachines) directly in that workspace.
+The **controller** needs `workspaces/content` access to enter child workspaces
+(this is how kcp authorizes traversing the workspace hierarchy) and
+`workspaces` read access to resolve paths like `root:network-provider` to the
+logical cluster names the virtual workspace requires.
 
 ```sh
 kubectl ws root
 kubectl apply -f test/fixtures/root-rbac-bootstrap.yaml
 ```
+
+(The webhook does **not** get RBAC here — its broad read is granted in
+`system:admin` per shard, see below.)
 
 ### Dep-ctrl workspace RBAC
 
@@ -318,28 +320,82 @@ kubectl apply -f test/fixtures/depctrl-rbac-bootstrap.yaml
 The file
 ([`test/fixtures/depctrl-rbac-bootstrap.yaml`](../test/fixtures/depctrl-rbac-bootstrap.yaml))
 grants both the controller and webhook SAs:
+
 - `apiexportendpointslices` read access (for VW URL discovery at startup)
 - `apiexports/content` full CRUD (for managing resources through the VW)
 
-### Consumer workspace RBAC
+### Webhook RBAC in `system:admin` (per shard)
 
-The webhook queries dependent resources directly in consumer workspaces via
-the kcp front-proxy. Each consumer workspace needs a `ClusterRole` and
-`ClusterRoleBinding` granting the webhook's service account `get` and `list`
-access on all resources:
+The webhook queries dependent resources directly in each consumer workspace,
+and consumer workspaces can live on any shard. kcp's
+`BootstrapPolicyAuthorizer` reads RBAC from the local shard's `system:admin`
+logical cluster only — bindings do **not** propagate across shards — so the
+webhook needs a `ClusterRole` + `ClusterRoleBinding` in `system:admin` of
+**every shard** that hosts consumer workspaces.
+
+`system:admin` is intentionally not reachable through the front-proxy. To
+apply RBAC there you need:
+
+1. A kubeconfig issued via a kcp-operator `Kubeconfig` CR with
+   `target.rootShardRef` (or `target.shardRef` for secondary shards) and
+   `groups: ["system:masters"]` — `system:masters` is honored by the shard
+   directly but not by the front-proxy.
+2. Direct shard access. The shard's ClusterIP service is normally not exposed;
+   `kubectl port-forward svc/<shard-svc>` to localhost is the simplest path.
+   Make sure the shard's server certificate has `localhost` / `127.0.0.1` in
+   its SANs (kcp-operator's `RootShard` / `Shard` `certificateTemplates`).
+
+Example (root shard):
 
 ```sh
-# Apply to each consumer workspace
-kubectl ws root:consumer1
-kubectl apply -f test/fixtures/consumer-rbac-bootstrap.yaml
+# 1. Generate a system:masters kubeconfig for the root shard
+kubectl apply -f - <<'EOF'
+apiVersion: operator.kcp.io/v1alpha1
+kind: Kubeconfig
+metadata:
+  name: root-system-masters
+  namespace: kcp-system
+spec:
+  username: bootstrap-system-masters
+  groups:
+    - "system:masters"
+  validity: 8766h
+  secretRef:
+    name: root-system-masters-kubeconfig
+  target:
+    rootShardRef:
+      name: root
+EOF
 
-kubectl ws root:consumer2
-kubectl apply -f test/fixtures/consumer-rbac-bootstrap.yaml
+kubectl -n kcp-system wait secret root-system-masters-kubeconfig \
+  --for=jsonpath='{.data.kubeconfig}' --timeout=120s
+
+kubectl -n kcp-system get secret root-system-masters-kubeconfig \
+  -o jsonpath='{.data.kubeconfig}' | base64 -d > /tmp/root-masters.kubeconfig
+# Rewrite the server URL in /tmp/root-masters.kubeconfig to https://localhost:6443
+# (or any free port you pick for the port-forward).
+
+# 2. Port-forward the root shard service
+kubectl -n kcp-system port-forward svc/root-kcp 6443:6443 &
+PF_PID=$!
+
+# 3. Apply the binding in /clusters/system:admin
+kubectl --kubeconfig /tmp/root-masters.kubeconfig \
+  --server https://localhost:6443/clusters/system:admin \
+  apply --validate=false -f test/fixtures/system-admin-rbac-bootstrap.yaml
+
+# 4. Stop the port-forward
+kill $PF_PID
 ```
 
-The file
-([`test/fixtures/consumer-rbac-bootstrap.yaml`](../test/fixtures/consumer-rbac-bootstrap.yaml))
-grants the webhook SA wildcard read access within that workspace.
+Repeat for every additional shard, swapping `rootShardRef` for
+`shardRef: {name: <shard-name>}` in the `Kubeconfig` CR and pointing the
+port-forward at that shard's service (e.g., `svc/shard1-shard-kcp`).
+
+The fixture
+([`test/fixtures/system-admin-rbac-bootstrap.yaml`](../test/fixtures/system-admin-rbac-bootstrap.yaml))
+grants the webhook SA `*/*` `get`/`list`. Within a shard, this binding
+applies to every workspace on that shard — no per-consumer RBAC is needed.
 
 ### Adjusting service account names
 
@@ -709,21 +765,26 @@ Here's the flow that makes Step 6e work:
 
 ## Multi-shard considerations
 
-The dependency-controller is fully multi-shard aware. Adding new shards
-requires **zero changes** to the dependency-controller configuration:
+The dependency-controller is multi-shard aware. The runtime data path needs
+no per-shard configuration — but the **bootstrap RBAC does**:
 
 - **Webhook installation**: The controller installs webhooks via the dep-ctrl
   APIExport's virtual workspace, which automatically routes to the correct
-  shard for each provider workspace.
+  shard for each provider workspace. No changes per shard.
 
-- **Per-request queries**: The webhook queries dependent resources via the kcp
-  front-proxy, which transparently routes requests to the correct shard based
-  on the logical cluster name. No shard-specific configuration is needed.
+- **Per-request queries**: The webhook queries dependent resources via the
+  kcp front-proxy, which transparently routes requests to the correct shard
+  based on the logical cluster name. No webhook-side configuration changes
+  per shard.
 
-- **RBAC**: No per-shard RBAC is needed. The controller accesses provider
-  workspaces through the dep-ctrl virtual workspace. The webhook accesses
-  consumer workspaces through the front-proxy, authorized by `workspaces/content`
-  RBAC in the root workspace and wildcard read RBAC in consumer workspaces.
+- **`system:admin` RBAC must be applied per shard.** kcp's
+  `BootstrapPolicyAuthorizer` reads RBAC from the local shard's `system:admin`
+  logical cluster only; bindings do not propagate across shards. Each new
+  shard that hosts consumer workspaces needs the webhook's wildcard read
+  binding applied via the procedure in [Step 3](#webhook-rbac-in-systemadmin-per-shard).
+
+- **Root and dep-ctrl workspace RBAC are applied once.** Those workspaces
+  live on the root shard and the bindings there are not duplicated.
 
 - **Kubeconfigs**: Component kubeconfigs must use certificates signed by
   `root-client-ca` (via `rootShardRef` in the Kubeconfig CR). This CA is
@@ -742,10 +803,17 @@ kubectl -n dependency-system logs -l app.kubernetes.io/component=webhook
 ```
 
 Common issues:
+
 - **Kubeconfig invalid** -- the webhook can't reach kcp
-- **Missing RBAC** -- ensure the dep-ctrl workspace RBAC from Step 3 is applied
-- **Missing consumer RBAC** -- ensure consumer workspaces have the webhook
-  read RBAC from Step 3 applied
+- **Missing dep-ctrl workspace RBAC** -- ensure
+  [Step 3](#dep-ctrl-workspace-rbac) was applied
+- **Missing `system:admin` RBAC on a shard** -- if the webhook can list on some
+  consumer workspaces but not others, the failing ones are likely on a shard
+  where the `system:admin` binding from
+  [Step 3](#webhook-rbac-in-systemadmin-per-shard) was never applied.
+  Verify with: `kubectl auth can-i list <some-resource>
+  --as=system:serviceaccount:dependency-system:dependency-webhook`
+  against the consumer workspace path.
 - **Certificate not trusted by shards** -- ensure kubeconfigs use `rootShardRef`
   (not `frontProxyRef`) so certs are signed by `root-client-ca`
 

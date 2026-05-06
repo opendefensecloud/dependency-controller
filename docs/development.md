@@ -69,10 +69,20 @@ make run-webhook      # Run the webhook server from source
 ### Test
 
 ```sh
-make test             # Unit + integration tests (requires kcp binary, excludes e2e)
-make test-e2e         # E2E tests (requires kind, helm, docker)
-make clean-e2e        # Remove kind cluster from e2e tests
+make test               # Unit + integration tests (requires kcp binary, excludes e2e)
+make test-e2e           # E2E tests (requires kind, helm, docker) — uses the active shard config
+make test-e2e-matrix    # Run e2e tests against both shard configs sequentially
+make clean-e2e          # Remove kind cluster from e2e tests
 ```
+
+`make test-e2e` honors the `E2E_SHARD_CONFIG` environment variable
+(`single-shard` or `multi-shard`, default `multi-shard`); see the [E2E Tests](#e2e-tests)
+section for what each config exercises. `make test-e2e-matrix` runs both back-to-back
+with a kind cleanup between runs.
+
+Tool paths can be overridden via `KIND`, `KUBECTL`, `HELM`, `DOCKER` env vars
+(fallback: PATH lookup). Set `E2E_SKIP_CLEANUP=1` to keep the kind cluster
+running after the suite for inspection.
 
 ### Lint & Format
 
@@ -111,27 +121,73 @@ kcp instance deployed via the
 
 1. Creates a kind cluster with a NodePort for the kcp front-proxy
 2. Installs cert-manager and the kcp-operator Helm chart
-3. Deploys two etcd instances and creates a `RootShard`, `Shard` (shard1), and
+3. Deploys two etcd instances and creates a `RootShard`, `Shard` (`shard1`), and
    `FrontProxy` via kcp-operator CRs
 4. Generates admin and component kubeconfigs via kcp-operator `Kubeconfig` CRs
    (using `rootShardRef` so certs are trusted by both front-proxy and shards)
-5. Builds the Docker image, loads it into kind, and deploys via Helm
-6. Exercises the full system including TLS webhook dispatch through kcp's
+5. Bootstraps RBAC (see below)
+6. Builds the Docker image, loads it into kind, and deploys via Helm
+7. Exercises the full system including TLS webhook dispatch through kcp's
    admission pipeline
 
-The test creates a 5-workspace topology:
-- **dep-ctrl** -- hosts the DependencyRule APIExport
-- **network-provider** -- exports VPCs
-- **compute-provider** -- exports VirtualMachines, creates a DependencyRule
-- **consumer1** -- on the root shard, binds to all providers
-- **consumer2** -- pinned to shard1 via location selector, verifies multi-shard
+### Workspace topology and shard placement
 
-Bootstrap RBAC is applied in the root and dep-ctrl workspaces. No shard-wide
-RBAC is needed — dependent resources are accessed through the dep-ctrl VW via
-dynamically managed permissionClaims.
+The five test workspaces (`dep-ctrl`, `network-provider`, `compute-provider`,
+`consumer1`, `consumer2`) are pinned deterministically to either `root` or
+`shard1` via `spec.location.selector`. Both shards carry an `e2e-target=<name>`
+label. After workspace readiness, `verifyShardPlacements` reads each
+workspace's `internal.tenancy.kcp.io/shard` annotation and asserts that
+selectors weren't ignored.
 
-Tool paths can be configured via environment variables (`KIND`, `KUBECTL`,
-`HELM`, `DOCKER`) with fallback to PATH lookup.
+Selection is driven by the `E2E_SHARD_CONFIG` env var:
+
+| Config           | Purpose                                  | Placements                                                                                                  |
+|------------------|------------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `single-shard`   | sanity / single-shard fast paths         | all five workspaces on `root`                                                                                |
+| `multi-shard` (default) | exercises every cross-shard path  | `compute-provider` and `consumer2` on `shard1`; `dep-ctrl`, `network-provider`, `consumer1` on `root` |
+
+Together, the two configs exercise: same-shard fast paths (single-shard);
+controller-VW cross-shard webhook installation, provider ↔ consumer
+cross-shard binding, and webhook ↔ consumer cross-shard query (multi-shard).
+Run `make test-e2e-matrix` to execute both sequentially.
+
+### Bootstrap RBAC
+
+Three RBAC bundles are applied during setup:
+
+1. **`system:admin` per shard** (`test/fixtures/system-admin-rbac-bootstrap.yaml`):
+   ClusterRole + ClusterRoleBinding granting the webhook SA `*/*` get/list.
+   Applied via direct (port-forwarded) connection to each shard, using a
+   `system:masters` kubeconfig generated from a kcp-operator `Kubeconfig` CR
+   with `rootShardRef` / `shardRef`. kcp's `BootstrapPolicyAuthorizer` reads
+   this binding from the local shard only — bindings do not propagate across
+   shards — so the fixture is applied once per shard.
+2. **Root workspace** (`test/fixtures/root-rbac-bootstrap.yaml`): controller-only
+   rules (workspaces/content access + tenancy.kcp.io/workspaces read), applied
+   via the front-proxy.
+3. **Dep-ctrl workspace** (`test/fixtures/depctrl-rbac-bootstrap.yaml`):
+   apiexportendpointslices read + dep-ctrl APIExport content access for both
+   the controller and webhook SAs.
+
+The webhook installation in provider workspaces is authorized by the
+`validatingwebhookconfigurations` permissionClaim on the dep-ctrl APIExport,
+not by RBAC.
+
+### Test scenarios
+
+`test/e2e/dependency_test.go` is an `Ordered` `Describe` covering:
+
+- Initial install (DependencyRule → ValidatingWebhookConfiguration appears)
+- Block / unblock cycles with a single dependent and with multiple dependents
+- Cross-shard isolation (`consumer2` with no VMs)
+- Cross-shard protection (`consumer2` with a VM, on `shard1` under multi-shard)
+- `skip-protection` annotation
+- DependencyRule deletion → webhook removal
+- DependencyRule recreation → protection restored
+- **In-place rule update**: patches `fieldRef.path` on a live rule and
+  verifies the webhook re-evaluates without a recreate cycle (proves
+  `WebhookInstaller.reconcileWorkspaceWebhook`'s update branch and the
+  webhook's `RuleCacheManager` re-indexing both work end-to-end).
 
 ### Fixtures
 
@@ -139,8 +195,8 @@ Test fixtures are loaded from YAML files rather than constructed inline:
 
 - `config/kcp/` -- the generated dep-ctrl APIResourceSchemas and APIExport
   (same files used for real deployment)
-- `test/fixtures/` -- test provider schemas (VPC, VirtualMachine) and their
-  APIExports
+- `test/fixtures/` -- test provider schemas (VPC, VirtualMachine), APIExports,
+  RBAC bundles, and per-test VPC/VM resources
 
 ## Deploying to kcp
 
@@ -153,7 +209,8 @@ kcp-operator Kubeconfig CRs, and Helm deployment.
 
 1. Deploy kcp via kcp-operator (RootShard, FrontProxy, optional additional Shards)
 2. Create the dep-ctrl workspace and apply `config/kcp/` schemas
-3. Apply bootstrap RBAC in root and dep-ctrl workspaces
+3. Apply bootstrap RBAC: per-shard `system:admin` (webhook get/list), root
+   workspace (controller), dep-ctrl workspace (APIExport access for both)
 4. Generate component kubeconfigs via kcp-operator Kubeconfig CRs (use `rootShardRef`)
 5. Deploy with Helm
 6. Providers bind to the dep-ctrl APIExport (accepting permissionClaims) and create DependencyRules

@@ -42,7 +42,11 @@ graph LR
     end
 
     subgraph ROOT["Root Workspace"]
-        ROOTROLE["ClusterRoles:<br/><i>workspaces/content +<br/>wildcard read (webhook)</i>"]
+        ROOTROLE["ClusterRoles:<br/><i>controller: workspaces/content<br/>+ workspaces read</i>"]
+    end
+
+    subgraph SYSADMIN["system:admin (per shard)"]
+        SACR["ClusterRoles:<br/><i>webhook: wildcard read</i><br/>(applied directly to each shard)"]
     end
 
     subgraph CW["Consumer WS"]
@@ -59,6 +63,7 @@ graph LR
     style CP fill:#e1f0da,color:#1a3e12
     style NP fill:#e1f0da,color:#1a3e12
     style ROOT fill:#f3e8ff,color:#4a1d7a
+    style SYSADMIN fill:#f3e8ff,color:#4a1d7a
     style CW fill:#fef3c7,color:#664d03
 ```
 
@@ -80,12 +85,21 @@ resources (VPCs, VMs). Consumers don't interact with the dependency system
 directly. The webhook queries dependent resources in consumer workspaces via
 the front-proxy using broad read RBAC.
 
-**Root workspace** -- hosts static `ClusterRoles` granting both components
-`workspaces/content` access (needed to enter child workspaces). The controller
-additionally gets `workspaces` read access to resolve workspace paths to logical
-cluster names. The webhook gets wildcard read access (`get`, `list` on all
-resources) to query dependent resources in consumer workspaces. This is a
-deployment prerequisite.
+**Root workspace** -- hosts static `ClusterRoles` for the **controller**:
+`workspaces/content` access (to enter child workspaces) and `workspaces` read
+(to resolve workspace paths to logical cluster names). This is a deployment
+prerequisite.
+
+**`system:admin` workspace, per shard** -- hosts a `ClusterRole` +
+`ClusterRoleBinding` granting the **webhook** wildcard read access (`get`,
+`list` on all resources). The webhook queries dependent resources directly
+in consumer workspaces, and consumer workspaces can live on any shard. kcp's
+`BootstrapPolicyAuthorizer` reads RBAC from the local shard's `system:admin`
+only — bindings do not propagate across shards — so this binding must be
+applied to **every shard** that hosts consumer workspaces. `system:admin` is
+not reachable through the front-proxy; the binding is applied via direct
+(port-forwarded) shard access using a `system:masters` identity issued from
+a kcp-operator `Kubeconfig` CR with `rootShardRef` / `shardRef`.
 
 ## Component Overview
 
@@ -221,8 +235,11 @@ The webhook derives the front-proxy base URL from its kubeconfig at startup by
 stripping the `/clusters/...` workspace path suffix. For each admission request,
 it builds a workspace-scoped URL: `{frontProxyBase}/clusters/{logicalClusterName}`.
 
-This approach is shard-transparent -- adding new kcp shards requires no changes
-to the webhook configuration, as the front-proxy handles routing automatically.
+This approach is routing-transparent across shards -- no webhook configuration
+change is required when shards are added, as the front-proxy handles routing
+based on the logical cluster name. Each new shard does, however, need the
+`system:admin` RBAC binding (see [Workspace Topology](#workspace-topology))
+applied so the webhook is authorized to list dependents on it.
 
 ### Admission Request Flow
 
@@ -337,6 +354,35 @@ the deleted resource name.
 
 ## Known Limitations
 
+### Dependency-provider workspaces must be direct children of root
+
+The path named in `DependencyRule.spec.dependencies[].apiExportRef.path`
+must currently be a direct child of `root` (e.g., `root:network-provider`).
+Nested paths such as `root:org:network-provider` will fail to resolve.
+
+The cause is in
+[`workspaceResolver.ensureResolved`](../internal/controller/dependencyrule_controller.go):
+the resolver splits the supplied path on `:`, takes only the last segment as
+the `Workspace` name, and looks that name up in the **root** workspace. A
+nested workspace will not be found there.
+
+This restriction applies **only** to the workspace hosting the protected
+APIExport. It does **not** apply to:
+
+- Consumer workspaces — the webhook identifies them by the `kcp.io/cluster`
+  annotation on the admission request (a logical cluster name, not a path)
+  and queries them directly through the front-proxy.
+- The dependent-provider workspace (where the `DependencyRule` itself
+  lives) — the controller and webhook discover rules through the dep-ctrl
+  APIExport's multicluster watch, which delivers the logical cluster name
+  with each event.
+- The dep-ctrl workspace — its location is pinned at deploy time via the
+  controller's kubeconfig.
+
+Lifting this limitation requires the resolver to walk the path segment by
+segment (or call kcp's path-aware Workspace lookup) instead of bottoming
+out at root.
+
 ### Circular dependencies
 
 The system does not detect cycles. If rule A says VM depends on VPC and rule B
@@ -350,8 +396,13 @@ in the consumer workspace. This adds latency compared to a cache-based approach,
 but DELETE operations are infrequent and the namespace-scoped listings are
 typically small.
 
-### Rule updates are not detected
+### Rule updates
 
-`registerRule` overwrites an existing registry entry if the key already exists.
-However, if a `DependencyRule`'s spec changes, the webhook will pick up the new
-metadata on the next reconcile event. No manual intervention is needed.
+In-place `DependencyRule` spec edits are picked up automatically: the
+`RuleCacheManager` reconciles on each update event and overwrites the
+existing registry entry, and `WebhookInstaller.reconcileWorkspaceWebhook`
+recomputes the desired webhook config from scratch on every change rather
+than maintaining incremental state. This is covered by the
+*"should propagate in-place DependencyRule updates to the webhook"* e2e
+scenario, which patches `fieldRef.path` on a live rule and verifies the
+webhook re-evaluates without a recreate cycle.
