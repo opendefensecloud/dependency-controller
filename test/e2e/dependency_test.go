@@ -250,4 +250,45 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		})
 		kcpctlNoFail(wsComputeProvider, "delete", "dependencyrule", "vm-dependencies") //nolint:errcheck
 	})
+
+	It("should propagate in-place DependencyRule updates to the webhook", func() {
+		// Patching a live rule's fieldRef to point at a non-existent path
+		// must cause the webhook's rule registry to re-evaluate dependents
+		// — there are now zero matches, so deletion must be allowed without
+		// the user touching VMs or recreating the rule.
+
+		By("creating the DependencyRule and a VPC+VM that triggers protection")
+		applyFixtureToWS(wsComputeProvider, filepath.Join(fixturesDir, "dependencyrule-vm-dependencies.yaml"), subs)
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-update-vpc.yaml"), nil)
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-update-vm.yaml"), nil)
+
+		By("waiting for the webhook to block update-vpc deletion under the original fieldPath")
+		waitFor(time.Minute, "webhook blocks update-vpc deletion", func() error {
+			out, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "update-vpc", "--namespace", "default")
+			if err == nil {
+				applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-update-vpc.yaml"), nil)
+				return fmt.Errorf("deletion was not blocked, recreated VPC")
+			}
+			if strings.Contains(out, "still referenced by") {
+				return nil
+			}
+
+			return fmt.Errorf("unexpected output: %s", out)
+		})
+
+		By("patching the rule's fieldRef.path to a non-existent field")
+		kcpctl(wsComputeProvider, "patch", "dependencyrule", "vm-dependencies",
+			"--type=json",
+			"-p", `[{"op":"replace","path":"/spec/dependencies/0/fieldRef/path","value":".spec.notarealfield"}]`)
+
+		By("verifying the webhook now allows deletion (rule update propagated, no recreate)")
+		waitFor(time.Minute, "rule update propagated to webhook registry", func() error {
+			_, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "update-vpc", "--namespace", "default")
+			return err
+		})
+
+		By("cleaning up")
+		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "update-vm", "--namespace", "default") //nolint:errcheck
+		kcpctlNoFail(wsComputeProvider, "delete", "dependencyrule", "vm-dependencies")               //nolint:errcheck
+	})
 })

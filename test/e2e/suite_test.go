@@ -67,6 +67,39 @@ var (
 	inClusterFPURL string
 )
 
+// shardPlacement maps each test workspace to the shard it should be pinned to
+// ("root" or "shard1"). Selected at suite startup via E2E_SHARD_CONFIG.
+type shardPlacement struct {
+	depCtrl         string
+	networkProvider string
+	computeProvider string
+	consumer1       string
+	consumer2       string
+}
+
+// Two architecturally distinct configurations. Together they exercise:
+//   - same-shard fast paths (single-shard)
+//   - cross-shard webhook installation, dep-ctrl ↔ provider, consumer ↔ provider,
+//     and webhook query (multi-shard)
+var shardConfigs = map[string]shardPlacement{
+	"single-shard": {
+		depCtrl:         "root",
+		networkProvider: "root",
+		computeProvider: "root",
+		consumer1:       "root",
+		consumer2:       "root",
+	},
+	"multi-shard": {
+		depCtrl:         "root",
+		networkProvider: "root",
+		computeProvider: "shard1",
+		consumer1:       "root",
+		consumer2:       "shard1",
+	},
+}
+
+var activeShardConfig shardPlacement
+
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "E2E Suite")
@@ -89,6 +122,20 @@ func init() {
 	kubectlBin = lookupTool("KUBECTL", "kubectl")
 	helmBin = lookupTool("HELM", "helm")
 	dockerBin = lookupTool("DOCKER", "docker")
+
+	name := os.Getenv("E2E_SHARD_CONFIG")
+	if name == "" {
+		name = "multi-shard"
+	}
+	cfg, ok := shardConfigs[name]
+	if !ok {
+		valid := make([]string, 0, len(shardConfigs))
+		for k := range shardConfigs {
+			valid = append(valid, k)
+		}
+		panic(fmt.Sprintf("unknown E2E_SHARD_CONFIG %q (valid: %v)", name, valid))
+	}
+	activeShardConfig = cfg
 }
 
 // run executes a command and returns combined output. Fails the test on non-zero exit.
@@ -152,7 +199,11 @@ func kcpctlRootNoFail(args ...string) (string, error) {
 	}, args...)...)
 }
 
-// applyFixtureToWS applies a YAML fixture to a kcp workspace with placeholder substitution.
+// applyFixtureToWS applies a YAML fixture to a kcp workspace with placeholder
+// substitution. Retries on transient kcp authorization errors that surface
+// while APIExports are propagating across shards (a fresh consumer workspace
+// on a non-root shard cannot bind to a provider's APIExport until kcp has
+// finished publishing the APIExport's APIExportEndpointSlice on that shard).
 func applyFixtureToWS(wsPath, file string, substitutions map[string]string) {
 	GinkgoHelper()
 	raw, err := os.ReadFile(file)
@@ -163,16 +214,22 @@ func applyFixtureToWS(wsPath, file string, substitutions map[string]string) {
 		content = strings.ReplaceAll(content, "${"+k+"}", v)
 	}
 
-	cmd := exec.CommandContext(context.Background(), kubectlBin,
-		"--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsPath),
-		"apply", "-f", "-",
-	)
-	cmd.Stdin = strings.NewReader(content)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	Expect(cmd.Run()).To(Succeed(), "applying %s to %s: %s", file, wsPath, buf.String())
+	waitFor(2*time.Minute, fmt.Sprintf("apply %s to %s", file, wsPath), func() error {
+		cmd := exec.CommandContext(context.Background(), kubectlBin,
+			"--kubeconfig", kcpHostKubeconfig,
+			"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsPath),
+			"apply", "-f", "-",
+		)
+		cmd.Stdin = strings.NewReader(content)
+		var buf bytes.Buffer
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%w: %s", err, buf.String())
+		}
+
+		return nil
+	})
 }
 
 // waitFor retries a check function until it succeeds or the timeout is reached.
@@ -773,26 +830,131 @@ func decodeBase64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(strings.TrimSpace(s))
 }
 
-// bootstrapRBAC uses the admin kubeconfig (system:kcp:admin) to create
-// RBAC for the controller and webhook identities.
+// bootstrapRBAC creates RBAC for the controller and webhook identities.
+// The webhook's broad get/list rule must be applied in system:admin on every
+// shard hosting consumer workspaces — the BootstrapPolicyAuthorizer reads
+// RBAC from the local shard's system:admin only ("the policy defined in
+// this workspace applies to every workspace in a kcp shard"; kcp source
+// pkg/authorization/bootstrap_policy_authorizer.go), so per-shard application
+// is required. Controller rules and dep-ctrl APIExport access live in the
+// root and dep-ctrl workspaces and go via the front-proxy.
 func bootstrapRBAC() {
-	// Apply RBAC in the root workspace via front-proxy.
+	// Webhook get/list, applied in system:admin on every shard via direct
+	// (port-forwarded) shard access.
+	applySystemAdminRBAC("root", "rootShardRef")
+	applySystemAdminRBAC("shard1", "shardRef")
+
+	// Controller-only RBAC in the root workspace via front-proxy.
 	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
 		"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
 		"apply", "-f", filepath.Join(fixturesDir, "root-rbac-bootstrap.yaml"))
 
-	// Apply RBAC in the dep-ctrl workspace (apiexportendpointslices read).
+	// Controller + webhook access to the dep-ctrl APIExport via front-proxy.
 	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
 		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsDepCtrl),
 		"apply", "-f", filepath.Join(fixturesDir, "depctrl-rbac-bootstrap.yaml"))
+}
 
-	// Apply RBAC in consumer workspaces so the webhook can list dependent
-	// resources directly when checking deletion protection.
-	for _, ws := range []string{wsConsumer1, wsConsumer2} {
-		run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
-			"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, ws),
-			"apply", "-f", filepath.Join(fixturesDir, "consumer-rbac-bootstrap.yaml"))
+// applySystemAdminRBAC creates a system:masters kubeconfig targeting the
+// given shard, port-forwards that shard's service to localhost, applies the
+// system:admin RBAC fixture there, then tears down the port-forward.
+//
+// refField selects the kcp-operator Kubeconfig target field: "rootShardRef"
+// for the root shard, "shardRef" for any secondary shard.
+func applySystemAdminRBAC(shardName, refField string) {
+	GinkgoHelper()
+
+	kubeconfigName := "e2e-" + shardName + "-system-masters"
+	secretName := kubeconfigName + "-kubeconfig"
+
+	// Create a Kubeconfig CR with the appropriate shard target + system:masters
+	// group. The front-proxy does not honor system:masters, so we must hit the
+	// shard directly. The shard's server cert already includes localhost /
+	// 127.0.0.1 (see the certificateTemplates on the RootShard / Shard CRs).
+	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
+kind: Kubeconfig
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  username: e2e-system-masters
+  groups:
+    - "system:masters"
+  validity: 8766h
+  secretRef:
+    name: %[3]s
+  target:
+    %[4]s:
+      name: %[5]s`, kubeconfigName, kcpNamespace, secretName, refField, shardName))
+
+	waitFor(2*time.Minute, fmt.Sprintf("%s secret created", secretName), func() error {
+		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", secretName,
+			"-o", "jsonpath={.data.kubeconfig}")
+
+		return err
+	})
+
+	kcRaw := kindctlSecret(secretName)
+	kcBytes, err := decodeBase64(kcRaw)
+	Expect(err).NotTo(HaveOccurred())
+	shardURL := extractServerFromKubeconfig(kcBytes)
+
+	parsed, err := url.Parse(shardURL)
+	Expect(err).NotTo(HaveOccurred())
+	shardSvc := strings.SplitN(parsed.Hostname(), ".", 2)[0]
+	shardPort := parsed.Port()
+	if shardPort == "" {
+		shardPort = "6443"
 	}
+
+	localPort := pickFreePort()
+	rewritten := strings.ReplaceAll(string(kcBytes),
+		shardURL, fmt.Sprintf("https://localhost:%d", localPort))
+	rewritten = strings.ReplaceAll(rewritten,
+		"current-context: default", "current-context: base")
+	sysKubeconfig := filepath.Join(tmpDir, kubeconfigName+".kubeconfig")
+	Expect(os.WriteFile(sysKubeconfig, []byte(rewritten), 0o600)).To(Succeed())
+
+	// Start port-forward in the background. kubectl port-forward exits when
+	// stdin closes; we kill it explicitly via defer.
+	pfCmd := exec.CommandContext(context.Background(), kubectlBin,
+		"--context", "kind-"+kindClusterName,
+		"-n", kcpNamespace, "port-forward",
+		"svc/"+shardSvc, fmt.Sprintf("%d:%s", localPort, shardPort))
+	pfCmd.Stdout = GinkgoWriter
+	pfCmd.Stderr = GinkgoWriter
+	Expect(pfCmd.Start()).To(Succeed())
+	defer func() {
+		_ = pfCmd.Process.Kill()
+		_, _ = pfCmd.Process.Wait()
+	}()
+
+	waitFor(30*time.Second, fmt.Sprintf("%s reachable via port-forward", shardSvc), func() error {
+		_, err := runNoFail(kubectlBin, "--kubeconfig", sysKubeconfig,
+			"--server", fmt.Sprintf("https://localhost:%d/clusters/system:admin", localPort),
+			"get", "--raw", "/readyz")
+
+		return err
+	})
+
+	// --validate=false: system:admin does not serve OpenAPI, so client-side
+	// schema validation has nothing to compare against.
+	run(kubectlBin, "--kubeconfig", sysKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%d/clusters/system:admin", localPort),
+		"apply", "--validate=false",
+		"-f", filepath.Join(fixturesDir, "system-admin-rbac-bootstrap.yaml"))
+}
+
+// pickFreePort asks the kernel for a free TCP port on localhost.
+func pickFreePort() int {
+	GinkgoHelper()
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+	port := listener.Addr().(*net.TCPAddr).Port
+	Expect(listener.Close()).To(Succeed())
+
+	return port
 }
 
 // extractServerFromKubeconfig extracts the server URL from a kubeconfig YAML.
@@ -814,21 +976,26 @@ func buildAndLoadImage() {
 }
 
 func setupKCPWorkspaces() {
-	// Label the secondary shard so we can pin consumer2 to it.
-	// The kcp-operator registers a kcp Shard object named after the CR.
-	waitFor(time.Minute, "shard1 kcp object exists", func() error {
-		_, err := kcpctlRootNoFail("get", "shard", "shard1")
-		return err
-	})
-	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
-		"label", "shard", "shard1", "e2e-target=shard1", "--overwrite")
-
-	// Create workspaces. consumer2 is pinned to shard1 via location selector.
-	for _, ws := range []string{wsDepCtrl, wsNetworkProvider, wsComputeProvider, wsConsumer1} {
-		createWorkspace(ws, "")
+	// Label both shards so we can pin workspaces deterministically. The
+	// kcp-operator registers a kcp Shard object named after each CR. Each
+	// workspace is then pinned via spec.location.selector.matchLabels using
+	// the active config below.
+	for _, shard := range []string{"root", "shard1"} {
+		waitFor(time.Minute, fmt.Sprintf("shard %s kcp object exists", shard), func() error {
+			_, err := kcpctlRootNoFail("get", "shard", shard)
+			return err
+		})
+		run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
+			"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
+			"label", "shard", shard, "e2e-target="+shard, "--overwrite")
 	}
-	createWorkspace(wsConsumer2, "shard1")
+
+	// Create workspaces with the placement dictated by the active shard config.
+	createWorkspace(wsDepCtrl, activeShardConfig.depCtrl)
+	createWorkspace(wsNetworkProvider, activeShardConfig.networkProvider)
+	createWorkspace(wsComputeProvider, activeShardConfig.computeProvider)
+	createWorkspace(wsConsumer1, activeShardConfig.consumer1)
+	createWorkspace(wsConsumer2, activeShardConfig.consumer2)
 
 	// Wait for workspaces to be ready.
 	for _, ws := range []string{wsDepCtrl, wsNetworkProvider, wsComputeProvider, wsConsumer1, wsConsumer2} {
@@ -844,6 +1011,11 @@ func setupKCPWorkspaces() {
 			return nil
 		})
 	}
+
+	// Verify each workspace landed on the shard the active config pinned
+	// it to. Pinning is the assertion — if scheduling ignored a selector,
+	// later cross-shard tests would silently degrade to single-shard.
+	verifyShardPlacements()
 
 	// Apply schemas and exports.
 	kcpctl(wsDepCtrl, "apply", "-f", filepath.Join(rootDir, "config/kcp/apiresourceschema-dependencyrules.dependencies.opendefense.cloud.yaml"))
@@ -896,6 +1068,66 @@ func setupKCPWorkspaces() {
 			return nil
 		})
 	}
+}
+
+// verifyShardPlacements asserts that each workspace landed on the shard the
+// active config pinned it to. The shard placement is exposed via the
+// internal.tenancy.kcp.io/shard annotation; the annotation value is the
+// shard's logical-cluster ID (not its name), so we infer the name→ID
+// mapping from the placements themselves and then check consistency:
+// workspaces sharing a target name must share an ID, and distinct targets
+// must resolve to distinct IDs.
+func verifyShardPlacements() {
+	GinkgoHelper()
+	expected := map[string]string{
+		wsDepCtrl:         activeShardConfig.depCtrl,
+		wsNetworkProvider: activeShardConfig.networkProvider,
+		wsComputeProvider: activeShardConfig.computeProvider,
+		wsConsumer1:       activeShardConfig.consumer1,
+		wsConsumer2:       activeShardConfig.consumer2,
+	}
+
+	const shardAnnotation = "internal.tenancy.kcp.io/shard"
+	jsonpath := fmt.Sprintf(`jsonpath={.metadata.annotations.%s}`,
+		strings.ReplaceAll(shardAnnotation, ".", `\.`))
+
+	waitFor(time.Minute, "shard placements match active config", func() error {
+		actual := make(map[string]string, len(expected))
+		for ws := range expected {
+			out, err := kcpctlRootNoFail("get", "workspace", ws, "-o", jsonpath)
+			if err != nil {
+				return err
+			}
+			id := strings.TrimSpace(out)
+			if id == "" {
+				return fmt.Errorf("workspace %s shard annotation not yet set", ws)
+			}
+			actual[ws] = id
+		}
+
+		// Build name→ID mapping from observations; flag mismatches in the
+		// same group (same target name, different IDs) and across groups
+		// (different target names, same ID — selector ignored).
+		nameToID := map[string]string{}
+		for ws, target := range expected {
+			id := actual[ws]
+			if existing, ok := nameToID[target]; ok && existing != id {
+				return fmt.Errorf("workspaces pinned to %q resolved to multiple shards: %q vs %q (workspace %s)",
+					target, existing, id, ws)
+			}
+			nameToID[target] = id
+		}
+		idToName := map[string]string{}
+		for name, id := range nameToID {
+			if existing, ok := idToName[id]; ok && existing != name {
+				return fmt.Errorf("shards %q and %q both resolved to logical cluster %q — selector ignored",
+					name, existing, id)
+			}
+			idToName[id] = name
+		}
+
+		return nil
+	})
 }
 
 // createWorkspace creates a kcp workspace under root. If shardTarget is non-empty,

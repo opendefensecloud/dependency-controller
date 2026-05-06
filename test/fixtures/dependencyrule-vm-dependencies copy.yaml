@@ -1,0 +1,19 @@
+apiVersion: dependencies.opendefense.cloud/v1alpha1
+kind: DependencyRule
+metadata:
+  name: vm-dependencies
+spec:
+  dependent:
+    apiExportName: compute.test.io
+    group: compute.test.io
+    version: v1
+    kind: VirtualMachine
+  dependencies:
+    - apiExportRef:
+        path: root:network-provider
+        name: network.test.io
+      group: network.test.io
+      version: v1
+      resource: vpcs
+      fieldRef:
+        path: ".spec.vpcRef.name"
