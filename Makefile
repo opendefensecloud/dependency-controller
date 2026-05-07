@@ -87,8 +87,15 @@ test: $(GINKGO) $(KCP) generate ## Run all tests (excludes e2e).
 	TEST_KCP_ASSETS=$(LOCALBIN) $(GINKGO) -r -cover --fail-fast --require-suite -covermode count --output-dir=$(BUILD_PATH) -coverprofile=coverprofile --skip-package=test/e2e $(testargs)
 
 .PHONY: test-e2e
-test-e2e: $(GINKGO) ## Run e2e tests (kind + kcp + helm).
+test-e2e: $(GINKGO) ## Run e2e tests (kind + kcp + helm). Set E2E_SHARD_CONFIG=single-shard|multi-shard (default: multi-shard).
 	$(GINKGO) -r --fail-fast -v --timeout 30m ./test/e2e/ $(testargs)
+
+.PHONY: test-e2e-matrix
+test-e2e-matrix: ## Run e2e tests against both shard configs (single-shard, multi-shard).
+	$(MAKE) clean-e2e
+	E2E_SHARD_CONFIG=single-shard $(MAKE) test-e2e
+	$(MAKE) clean-e2e
+	E2E_SHARD_CONFIG=multi-shard  $(MAKE) test-e2e
 
 .PHONY: e2e-cleanup
 clean-e2e: ## Remove kind cluster from e2e tests.

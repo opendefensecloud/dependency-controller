@@ -40,37 +40,6 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 		})
 	})
 
-	It("should have shard-wide apiexports/content access via system:admin bootstrap RBAC", func() {
-		// The webhook SA has shard-wide apiexports/content and apiexportendpointslices
-		// access granted via system:admin RBAC (Bootstrap Policy Authorizer), instead
-		// of per-workspace dynamic RBAC managed by the controller.
-
-		By("verifying webhook SA has apiexports/content on compute.test.io in compute-provider")
-		waitFor(time.Minute, "webhook SA has apiexports/content on compute.test.io", func() error {
-			allowed, err := webhookSACanAccessExport(wsComputeProvider, "compute.test.io")
-			if err != nil {
-				return fmt.Errorf("SAR check: %w", err)
-			}
-			if !allowed {
-				return fmt.Errorf("webhook SA does not yet have apiexports/content on compute.test.io")
-			}
-
-			return nil
-		})
-
-		By("verifying webhook SA also has apiexports/content on network.test.io (shard-wide)")
-		allowed, err := webhookSACanAccessExport(wsNetworkProvider, "network.test.io")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(allowed).To(BeTrue(),
-			"webhook SA should have shard-wide apiexports/content access via system:admin")
-
-		By("verifying webhook SA cannot access secrets in compute-provider")
-		allowed, err = webhookSACanAccessResource(wsComputeProvider, "", "secrets", "list")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(allowed).To(BeFalse(),
-			"webhook SA should NOT be able to list secrets")
-	})
-
 	It("should block VPC deletion while a VM references it", func() {
 		waitFor(time.Minute, "webhook blocks VPC deletion", func() error {
 			out, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "my-vpc", "--namespace", "default")
@@ -133,6 +102,39 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 
 		waitFor(30*time.Second, "VPC deletion succeeds in consumer2", func() error {
 			_, err := kcpctlNoFail(wsConsumer2, "delete", "vpc", "isolated-vpc", "--namespace", "default")
+			return err
+		})
+	})
+
+	It("should block VPC deletion in consumer2 (may be on a different shard)", func() {
+		// consumer2 may be scheduled on a different shard than consumer1,
+		// validating that webhook protection works regardless of shard placement.
+		By("creating a VPC in consumer2")
+		applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vpc-shard-vpc.yaml"), nil)
+
+		By("creating a VM referencing the VPC in consumer2")
+		applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vm-shard-vm.yaml"), nil)
+
+		By("waiting for the webhook to block shard-vpc deletion")
+		waitFor(time.Minute, "webhook blocks shard-vpc deletion", func() error {
+			out, err := kcpctlNoFail(wsConsumer2, "delete", "vpc", "shard-vpc", "--namespace", "default")
+			if err == nil {
+				applyFixtureToWS(wsConsumer2, filepath.Join(fixturesDir, "vpc-shard-vpc.yaml"), nil)
+				return fmt.Errorf("deletion was not blocked, recreated VPC")
+			}
+			if strings.Contains(out, "still referenced by") {
+				return nil
+			}
+
+			return fmt.Errorf("unexpected output: %s", out)
+		})
+
+		By("deleting the VM to release the VPC")
+		kcpctl(wsConsumer2, "delete", "virtualmachine", "shard-vm", "--namespace", "default")
+
+		By("verifying VPC deletion now succeeds")
+		waitFor(time.Minute, "shard-vpc deletion allowed after VM removed", func() error {
+			_, err := kcpctlNoFail(wsConsumer2, "delete", "vpc", "shard-vpc", "--namespace", "default")
 			return err
 		})
 	})
@@ -208,9 +210,6 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			return err
 		}()).To(Succeed())
 
-		// RBAC is not affected by rule deletion — webhook SA retains shard-wide
-		// apiexports/content access via system:admin bootstrap RBAC.
-
 		// Clean up remaining resources.
 		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "cleanup-vm", "--namespace", "default") //nolint:errcheck
 	})
@@ -250,5 +249,46 @@ var _ = Describe("Dependency Controller E2E", Ordered, func() {
 			return err
 		})
 		kcpctlNoFail(wsComputeProvider, "delete", "dependencyrule", "vm-dependencies") //nolint:errcheck
+	})
+
+	It("should propagate in-place DependencyRule updates to the webhook", func() {
+		// Patching a live rule's fieldRef to point at a non-existent path
+		// must cause the webhook's rule registry to re-evaluate dependents
+		// — there are now zero matches, so deletion must be allowed without
+		// the user touching VMs or recreating the rule.
+
+		By("creating the DependencyRule and a VPC+VM that triggers protection")
+		applyFixtureToWS(wsComputeProvider, filepath.Join(fixturesDir, "dependencyrule-vm-dependencies.yaml"), subs)
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-update-vpc.yaml"), nil)
+		applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vm-update-vm.yaml"), nil)
+
+		By("waiting for the webhook to block update-vpc deletion under the original fieldPath")
+		waitFor(time.Minute, "webhook blocks update-vpc deletion", func() error {
+			out, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "update-vpc", "--namespace", "default")
+			if err == nil {
+				applyFixtureToWS(wsConsumer1, filepath.Join(fixturesDir, "vpc-update-vpc.yaml"), nil)
+				return fmt.Errorf("deletion was not blocked, recreated VPC")
+			}
+			if strings.Contains(out, "still referenced by") {
+				return nil
+			}
+
+			return fmt.Errorf("unexpected output: %s", out)
+		})
+
+		By("patching the rule's fieldRef.path to a non-existent field")
+		kcpctl(wsComputeProvider, "patch", "dependencyrule", "vm-dependencies",
+			"--type=json",
+			"-p", `[{"op":"replace","path":"/spec/dependencies/0/fieldRef/path","value":".spec.notarealfield"}]`)
+
+		By("verifying the webhook now allows deletion (rule update propagated, no recreate)")
+		waitFor(time.Minute, "rule update propagated to webhook registry", func() error {
+			_, err := kcpctlNoFail(wsConsumer1, "delete", "vpc", "update-vpc", "--namespace", "default")
+			return err
+		})
+
+		By("cleaning up")
+		kcpctlNoFail(wsConsumer1, "delete", "virtualmachine", "update-vm", "--namespace", "default") //nolint:errcheck
+		kcpctlNoFail(wsComputeProvider, "delete", "dependencyrule", "vm-dependencies")               //nolint:errcheck
 	})
 })

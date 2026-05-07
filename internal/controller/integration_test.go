@@ -194,7 +194,6 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 
 		cacheMgr := &depwebhook.RuleCacheManager{
 			DepCtrlManager: mgr,
-			BaseConfig:     kcpConfig,
 			Scheme:         scheme.Scheme,
 			APIExportName:  "dependencies.opendefense.cloud",
 			Registry:       registry,
@@ -219,10 +218,9 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Create the controller-side reconciler (webhook install only, no RBAC in envtest).
-		webhookInstaller := controller.NewWebhookInstaller(kcpConfig, webhookURL, caBundle)
+		webhookInstaller := controller.NewWebhookInstaller(mgr, webhookURL, caBundle)
 
 		ruleReconciler := controller.NewDependencyRuleReconciler(mgr)
-		ruleReconciler.APIExportName = "dependencies.opendefense.cloud"
 		ruleReconciler.BaseConfig = kcpConfig
 		ruleReconciler.WebhookInstaller = webhookInstaller
 
@@ -233,7 +231,7 @@ var _ = Describe("Dependency Controller", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// Wire up the webhook handler with the rule registry.
-		webhookHandler = &depwebhook.DeletionValidator{Registry: registry, Initialized: initialized}
+		webhookHandler = &depwebhook.DeletionValidator{Registry: registry, Initialized: initialized, BaseConfig: kcpConfig}
 
 		// Start the manager.
 		go func() {

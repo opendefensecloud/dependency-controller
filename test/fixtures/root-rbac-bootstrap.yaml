@@ -1,10 +1,11 @@
-# RBAC in the root workspace for the dependency-controller system.
-# Applied during setup using a bootstrap (system:masters) identity.
+# RBAC in the root workspace for the dependency-controller.
+# Applied during setup using a system:kcp:admin identity via front-proxy.
 #
-# Both components need workspaces/content access to enter the dep-ctrl
-# workspace (where their kubeconfig points). Webhook installation and
-# RBAC management in provider workspaces is done through the dep-ctrl
-# APIExport's virtual workspace, authorized by permissionClaims.
+# Only the controller has rules here. The webhook's broad get/list access
+# lives in the system:admin workspace of the root shard (see
+# system-admin-rbac-bootstrap.yaml) and propagates shard-wide. Webhook
+# installation and RBAC management in provider workspaces is done through
+# the dep-ctrl APIExport's virtual workspace, authorized by permissionClaims.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -32,26 +33,3 @@ subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: User
     name: "system:serviceaccount:dependency-system:dependency-controller"
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: dependency-controller-webhook
-rules:
-  # Enter child workspaces through virtual workspace endpoints.
-  - apiGroups: ["core.kcp.io"]
-    resources: ["workspaces/content"]
-    verbs: ["access"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: dependency-controller-webhook
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: dependency-controller-webhook
-subjects:
-  - apiGroup: rbac.authorization.k8s.io
-    kind: User
-    name: "system:serviceaccount:dependency-system:dependency-webhook"

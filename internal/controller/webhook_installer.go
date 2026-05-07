@@ -8,15 +8,13 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/kcp-dev/logicalcluster/v3"
 	registrationv1 "k8s.io/api/admissionregistration/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 )
@@ -35,7 +33,11 @@ const webhookName = "dependency-controller"
 // When a DependencyRule is deleted, its contributions are removed. If no rules
 // remain for a workspace the webhook is deleted entirely.
 type WebhookInstaller struct {
-	BaseConfig *rest.Config
+	// Manager is the multicluster manager for the dep-ctrl APIExport. Used to
+	// obtain per-workspace clients via the virtual workspace, which scopes
+	// access to workspaces that have bound the APIExport and accepted the
+	// validatingwebhookconfigurations permissionClaim.
+	Manager    mcmanager.Manager
 	WebhookURL string
 	CABundle   []byte
 
@@ -56,9 +58,9 @@ type webhookRuleKey struct {
 	Resource string
 }
 
-func NewWebhookInstaller(baseCfg *rest.Config, webhookURL string, caBundle []byte) *WebhookInstaller {
+func NewWebhookInstaller(mgr mcmanager.Manager, webhookURL string, caBundle []byte) *WebhookInstaller {
 	return &WebhookInstaller{
-		BaseConfig:  baseCfg,
+		Manager:     mgr,
 		WebhookURL:  webhookURL,
 		CABundle:    caBundle,
 		ruleTargets: make(map[string][]ruleTarget),
@@ -153,13 +155,11 @@ func (w *WebhookInstaller) reconcileWorkspaceWebhook(ctx context.Context, wsPath
 	// Compute desired rules for this workspace across all DependencyRules.
 	desired := w.desiredRulesForWorkspace(wsPath)
 
-	cfg := rest.CopyConfig(w.BaseConfig)
-	cfg.Host += logicalcluster.NewPath(wsPath).RequestPath()
-
-	c, err := client.New(cfg, client.Options{Scheme: scheme.Scheme})
+	cl, err := w.Manager.GetCluster(ctx, multicluster.ClusterName(wsPath))
 	if err != nil {
-		return fmt.Errorf("creating client for %s: %w", wsPath, err)
+		return fmt.Errorf("getting cluster %s from manager: %w", wsPath, err)
 	}
+	c := cl.GetClient()
 
 	whCfg := &registrationv1.ValidatingWebhookConfiguration{}
 	err = c.Get(ctx, types.NamespacedName{Name: webhookName}, whCfg)

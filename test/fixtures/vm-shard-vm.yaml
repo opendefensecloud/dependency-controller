@@ -1,0 +1,9 @@
+apiVersion: compute.test.io/v1
+kind: VirtualMachine
+metadata:
+  name: shard-vm
+  namespace: default
+spec:
+  cpu: 2
+  vpcRef:
+    name: shard-vpc

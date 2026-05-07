@@ -27,9 +27,6 @@ spec:
             - /dependency-webhook
           args:
             - --api-export-name={{ .Values.apiExportName }}
-            {{- if .Values.kcpBaseHost }}
-            - --kcp-base-host={{ .Values.kcpBaseHost }}
-            {{- end }}
             - --webhook-port={{ .Values.webhook.port }}
             - --tls-cert-dir={{ .Values.webhook.tlsCertDir }}
             - --health-probe-bind-address={{ .Values.webhook.healthProbeBindAddress }}

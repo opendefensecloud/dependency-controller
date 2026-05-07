@@ -1,0 +1,32 @@
+# RBAC for the dependency-controller webhook in the system:admin workspace.
+# Applied during setup using a system:masters identity over a direct
+# (port-forwarded) connection to each shard. The system:admin workspace
+# is not reachable via the front-proxy.
+#
+# kcp's BootstrapPolicyAuthorizer reads RBAC from the local shard's
+# system:admin only — bindings do not propagate across shards — so this
+# fixture is applied once per shard. Within a shard the binding applies
+# to every workspace on that shard, so the webhook can get/list dependent
+# resources in any consumer workspace without per-workspace RBAC.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dependency-controller-webhook
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dependency-controller-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dependency-controller-webhook
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "system:serviceaccount:dependency-system:dependency-webhook"

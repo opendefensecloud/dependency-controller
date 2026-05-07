@@ -57,6 +57,13 @@ type DependentRef struct {
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[A-Z][A-Za-z0-9]*$`
 	Kind string `json:"kind"`
+
+	// Resource is the plural resource name of the dependent (e.g., "virtualmachines").
+	// Used by the webhook to construct the GVR for listing dependent resources.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9]*$`
+	Resource string `json:"resource"`
 }
 
 // APIExportReference identifies an APIExport by workspace path and name.
