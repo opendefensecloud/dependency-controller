@@ -203,6 +203,8 @@ func (w *workspaceResolver) ensureResolved(ctx context.Context, paths []string) 
 		var parentPath string
 		if i := strings.LastIndex(path, ":"); i >= 0 {
 			parentPath = path[:i]
+		} else {
+			return fmt.Errorf("workspace path %q must have at least one parent segment", path)
 		}
 
 		parentCfg := rest.CopyConfig(w.baseCfg)
@@ -220,7 +222,8 @@ func (w *workspaceResolver) ensureResolved(ctx context.Context, paths []string) 
 
 		for _, ws := range wsList.Items {
 			if ws.Spec.Cluster == "" {
-				return fmt.Errorf("workspace %s has no logical cluster name", ws.Name)
+				log.FromContext(ctx).Info("skipping workspace with no logical cluster name (still provisioning?)", "workspace", ws.Name, "parent", parentPath)
+				continue
 			}
 
 			wsPath := parentPath + ":" + ws.Name

@@ -12,24 +12,33 @@ import (
 	"github.com/kcp-dev/logicalcluster/v3"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
+var testScheme *runtime.Scheme
+
+func init() {
+	testScheme = runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(testScheme)
+	_ = tenancyv1alpha1.AddToScheme(testScheme)
+}
+
 func newTestResolver(factory func(*rest.Config, client.Options) (client.Client, error)) *workspaceResolver {
 	return &workspaceResolver{
 		baseCfg:   &rest.Config{Host: "https://kcp.example"},
-		scheme:    scheme.Scheme,
+		scheme:    testScheme,
 		newClient: factory,
 	}
 }
 
 func TestWorkspaceResolver_EnsureResolved_ResolvesPath(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme.Scheme).
+		WithScheme(testScheme).
 		WithLists(&tenancyv1alpha1.WorkspaceList{
 			Items: []tenancyv1alpha1.Workspace{
 				{
@@ -67,7 +76,7 @@ func TestWorkspaceResolver_EnsureResolved_UsesCache(t *testing.T) {
 
 func TestWorkspaceResolver_EnsureResolved_ListErrorPropagates(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme.Scheme).
+		WithScheme(testScheme).
 		WithInterceptorFuncs(interceptor.Funcs{
 			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
 				return errors.New("kaboom")
@@ -97,7 +106,7 @@ func TestWorkspaceResolver_EnsureResolved_RoutesPerParent(t *testing.T) {
 
 	clientsByHost := map[string]client.Client{
 		baseHost + logicalcluster.NewPath("root:org-a").RequestPath(): fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithLists(&tenancyv1alpha1.WorkspaceList{
 				Items: []tenancyv1alpha1.Workspace{{
 					ObjectMeta: metav1.ObjectMeta{Name: "team-a"},
@@ -108,7 +117,7 @@ func TestWorkspaceResolver_EnsureResolved_RoutesPerParent(t *testing.T) {
 				}},
 			}).Build(),
 		baseHost + logicalcluster.NewPath("root:org-b").RequestPath(): fake.NewClientBuilder().
-			WithScheme(scheme.Scheme).
+			WithScheme(testScheme).
 			WithLists(&tenancyv1alpha1.WorkspaceList{
 				Items: []tenancyv1alpha1.Workspace{{
 					ObjectMeta: metav1.ObjectMeta{Name: "team-y"},
@@ -131,7 +140,7 @@ func TestWorkspaceResolver_EnsureResolved_RoutesPerParent(t *testing.T) {
 
 	r := &workspaceResolver{
 		baseCfg:   &rest.Config{Host: baseHost},
-		scheme:    scheme.Scheme,
+		scheme:    testScheme,
 		newClient: factory,
 	}
 
