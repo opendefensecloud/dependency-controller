@@ -62,7 +62,11 @@ func (r *DependencyRuleReconciler) ensureInitialized() error {
 
 	localMgr := r.DepCtrlManager.GetLocalManager()
 
-	r.wsResolver = &workspaceResolver{baseCfg: r.BaseConfig, scheme: localMgr.GetScheme()}
+	r.wsResolver = &workspaceResolver{
+		baseCfg:   r.BaseConfig,
+		scheme:    localMgr.GetScheme(),
+		newClient: client.New,
+	}
 
 	return nil
 }
@@ -162,8 +166,9 @@ func (r *DependencyRuleReconciler) handleDeletion(ctx context.Context, key, rule
 // workspaceResolver maps kcp workspace paths (e.g., "root:compute-provider")
 // to logical cluster names by reading Workspace objects from the root workspace.
 type workspaceResolver struct {
-	baseCfg *rest.Config // kcp front-proxy URL without any workspace path suffix
-	scheme  *runtime.Scheme
+	baseCfg   *rest.Config // kcp front-proxy URL without any workspace path suffix
+	scheme    *runtime.Scheme
+	newClient func(cfg *rest.Config, options client.Options) (client.Client, error)
 
 	mu    sync.Mutex
 	cache map[string]string // workspace path -> logical cluster name
@@ -190,10 +195,6 @@ func (w *workspaceResolver) ensureResolved(ctx context.Context, paths []string) 
 		return nil
 	}
 
-	//	c, err := client.New(w.rootCfg, client.Options{Scheme: w.scheme})
-	//	if err != nil {
-	//		return fmt.Errorf("creating root workspace client: %w", err)
-	//	}
 	for _, path := range missing {
 		if _, ok := w.cache[path]; ok {
 			continue
@@ -207,7 +208,7 @@ func (w *workspaceResolver) ensureResolved(ctx context.Context, paths []string) 
 		parentCfg := rest.CopyConfig(w.baseCfg)
 		parentCfg.Host += logicalcluster.NewPath(parentPath).RequestPath()
 
-		c, err := client.New(parentCfg, client.Options{Scheme: w.scheme})
+		c, err := w.newClient(parentCfg, client.Options{Scheme: w.scheme})
 		if err != nil {
 			return fmt.Errorf("creating %s workspace client: %w", parentPath, err)
 		}
