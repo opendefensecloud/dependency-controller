@@ -201,12 +201,12 @@ workspace paths to logical cluster names.
 for VW URL discovery and full CRUD on `apiexports/content` to manage webhooks in
 binding workspaces via the VW.
 
-**system:admin** (shard-local) -- the webhook SA gets shard-wide read access to
-`apiexports/content` and `apiexportendpointslices`. This is evaluated by the Bootstrap
-Policy Authorizer for every request on the shard, giving the webhook access to all
-provider APIExport virtual workspaces without per-workspace RBAC.
+No shard-wide RBAC is needed. The webhook watches dependent resources through the
+dep-ctrl APIExport's virtual workspace, authorized by dynamically managed
+permissionClaims. Providers accept these claims in their APIBinding.
 
-See [docs/getting-started.md](docs/getting-started.md) for the full bootstrap procedure.
+See [docs/getting-started.md](docs/getting-started.md) for the full deployment guide
+using [kcp-operator](https://github.com/kcp-dev/helm-charts).
 
 ## Development
 
@@ -228,6 +228,7 @@ make build
 make test
 
 # E2E tests (requires kind, helm, docker)
+# Deploys a multi-shard kcp via kcp-operator (root + shard1)
 make test-e2e
 ```
 

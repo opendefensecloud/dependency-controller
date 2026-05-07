@@ -1,0 +1,9 @@
+apiVersion: compute.test.io/v1
+kind: VirtualMachine
+metadata:
+  name: update-vm
+  namespace: default
+spec:
+  cpu: 1
+  vpcRef:
+    name: update-vpc

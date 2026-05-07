@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -14,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -25,6 +26,7 @@ import (
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
 	"go.opendefense.cloud/dependency-controller/internal/controller"
+	"go.opendefense.cloud/dependency-controller/internal/kcp"
 )
 
 var scheme = runtime.NewScheme()
@@ -58,14 +60,37 @@ func main() {
 
 	cfg := ctrl.GetConfigOrDie()
 
+	if err := kcp.ValidateKubeconfig(cfg); err != nil {
+		setupLog.Error(err, "invalid kubeconfig")
+		os.Exit(1)
+	}
+
 	// Derive base config (root kcp URL without workspace path).
-	baseCfg := rest.CopyConfig(cfg)
+	baseCfg, err := kcp.BaseConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to derive front-proxy base URL from kubeconfig")
+		os.Exit(1)
+	}
 	if kcpBaseHost != "" {
 		baseCfg.Host = kcpBaseHost
 	}
 
+	// Resolve the APIExportEndpointSlice name for the dep-ctrl's APIExport.
+	// The slice name is not necessarily the same as the APIExport name.
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create client for endpoint slice discovery")
+		os.Exit(1)
+	}
+
+	ess, err := kcp.FindEndpointSlice(context.Background(), directClient, apiExportName)
+	if err != nil {
+		setupLog.Error(err, "unable to find APIExportEndpointSlice", "apiExport", apiExportName)
+		os.Exit(1)
+	}
+
 	// Create apiexport provider for the dependency-controller's own APIExport.
-	depCtrlProvider, err := apiexport.New(cfg, apiExportName, apiexport.Options{
+	depCtrlProvider, err := apiexport.New(cfg, ess.Name, apiexport.Options{
 		Scheme: scheme,
 	})
 	if err != nil {
@@ -97,7 +122,6 @@ func main() {
 
 	// Register the multicluster DependencyRule reconciler.
 	reconciler := controller.NewDependencyRuleReconciler(mgr)
-	reconciler.APIExportName = apiExportName
 	reconciler.BaseConfig = baseCfg
 
 	// Wire up webhook installer if configured.
@@ -110,7 +134,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		reconciler.WebhookInstaller = controller.NewWebhookInstaller(nil, webhookURL, caBundle)
+		reconciler.WebhookInstaller = controller.NewWebhookInstaller(mgr, webhookURL, caBundle)
 	}
 
 	if err := mcbuilder.ControllerManagedBy(mgr).

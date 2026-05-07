@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -29,14 +31,15 @@ var (
 )
 
 const (
-	kindClusterName    = "dep-ctrl-e2e"
-	kcpNamespace       = "kcp-system"
-	depNamespace       = "dependency-system"
-	kcpNodePort        = "31500"
-	kcpServerLocalPort = "31501" // NodePort to kcp server (not front-proxy)
-	certManagerVer     = "v1.17.2"
-	imageName          = "dependency-controller:integration-test"
-	helmTimeout        = "300s"
+	kindClusterName = "dep-ctrl-e2e"
+	kcpNamespace    = "kcp-system"
+	depNamespace    = "dependency-system"
+	certManagerVer  = "v1.17.2"
+	imageName       = "dependency-controller:integration-test"
+	helmTimeout     = "300s"
+
+	// NodePort for the front-proxy service exposed via kind.
+	frontProxyNodePort = "31443"
 )
 
 // Workspace names under root.
@@ -59,7 +62,43 @@ var (
 	// Per-component kubeconfigs for in-cluster pods.
 	controllerKubeconfigPath string
 	webhookKubeconfigPath    string
+
+	// In-cluster front-proxy base URL (extracted from kcp-operator kubeconfig).
+	inClusterFPURL string
 )
+
+// shardPlacement maps each test workspace to the shard it should be pinned to
+// ("root" or "shard1"). Selected at suite startup via E2E_SHARD_CONFIG.
+type shardPlacement struct {
+	depCtrl         string
+	networkProvider string
+	computeProvider string
+	consumer1       string
+	consumer2       string
+}
+
+// Two architecturally distinct configurations. Together they exercise:
+//   - same-shard fast paths (single-shard)
+//   - cross-shard webhook installation, dep-ctrl ↔ provider, consumer ↔ provider,
+//     and webhook query (multi-shard)
+var shardConfigs = map[string]shardPlacement{
+	"single-shard": {
+		depCtrl:         "root",
+		networkProvider: "root",
+		computeProvider: "root",
+		consumer1:       "root",
+		consumer2:       "root",
+	},
+	"multi-shard": {
+		depCtrl:         "root",
+		networkProvider: "root",
+		computeProvider: "shard1",
+		consumer1:       "root",
+		consumer2:       "shard1",
+	},
+}
+
+var activeShardConfig shardPlacement
 
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -83,6 +122,20 @@ func init() {
 	kubectlBin = lookupTool("KUBECTL", "kubectl")
 	helmBin = lookupTool("HELM", "helm")
 	dockerBin = lookupTool("DOCKER", "docker")
+
+	name := os.Getenv("E2E_SHARD_CONFIG")
+	if name == "" {
+		name = "multi-shard"
+	}
+	cfg, ok := shardConfigs[name]
+	if !ok {
+		valid := make([]string, 0, len(shardConfigs))
+		for k := range shardConfigs {
+			valid = append(valid, k)
+		}
+		panic(fmt.Sprintf("unknown E2E_SHARD_CONFIG %q (valid: %v)", name, valid))
+	}
+	activeShardConfig = cfg
 }
 
 // run executes a command and returns combined output. Fails the test on non-zero exit.
@@ -126,7 +179,7 @@ func kcpctl(wsPath string, args ...string) {
 	GinkgoHelper()
 	run(kubectlBin, append([]string{
 		"--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsPath),
 	}, args...)...)
 }
 
@@ -134,7 +187,7 @@ func kcpctl(wsPath string, args ...string) {
 func kcpctlNoFail(wsPath string, args ...string) (string, error) {
 	return runNoFail(kubectlBin, append([]string{
 		"--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsPath),
 	}, args...)...)
 }
 
@@ -142,98 +195,15 @@ func kcpctlNoFail(wsPath string, args ...string) (string, error) {
 func kcpctlRootNoFail(args ...string) (string, error) {
 	return runNoFail(kubectlBin, append([]string{
 		"--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root", kcpNodePort),
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
 	}, args...)...)
 }
 
-// subjectAccessReview is the JSON structure for a SubjectAccessReview response.
-type subjectAccessReview struct {
-	Status struct {
-		Allowed bool   `json:"allowed"`
-		Reason  string `json:"reason"`
-	} `json:"status"`
-}
-
-// webhookSACanAccessExport checks if the webhook SA has apiexports/content
-// access for the given APIExport in the specified workspace, using a
-// SubjectAccessReview evaluated by kcp.
-func webhookSACanAccessExport(wsPath, exportName string) (bool, error) {
-	sarJSON := fmt.Sprintf(`{
-  "apiVersion": "authorization.k8s.io/v1",
-  "kind": "SubjectAccessReview",
-  "spec": {
-    "user": "system:serviceaccount:%s:dependency-webhook",
-    "groups": ["system:serviceaccounts", "system:serviceaccounts:%s"],
-    "resourceAttributes": {
-      "group": "apis.kcp.io",
-      "resource": "apiexports",
-      "subresource": "content",
-      "name": %q,
-      "verb": "get"
-    }
-  }
-}`, depNamespace, depNamespace, exportName)
-
-	cmd := exec.CommandContext(context.Background(), kubectlBin,
-		"--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
-		"create", "-f", "-", "-o", "json",
-	)
-	cmd.Stdin = strings.NewReader(sarJSON)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("SAR failed in %s: %s %v", wsPath, buf.String(), err)
-	}
-
-	var sar subjectAccessReview
-	if err := json.Unmarshal(buf.Bytes(), &sar); err != nil {
-		return false, fmt.Errorf("parsing SAR response: %w", err)
-	}
-
-	return sar.Status.Allowed, nil
-}
-
-// webhookSACanAccessResource checks if the webhook SA can access a specific
-// resource type in a workspace, using a SubjectAccessReview.
-func webhookSACanAccessResource(wsPath, group, resource, verb string) (bool, error) {
-	sarJSON := fmt.Sprintf(`{
-  "apiVersion": "authorization.k8s.io/v1",
-  "kind": "SubjectAccessReview",
-  "spec": {
-    "user": "system:serviceaccount:%s:dependency-webhook",
-    "groups": ["system:serviceaccounts", "system:serviceaccounts:%s"],
-    "resourceAttributes": {
-      "group": %q,
-      "resource": %q,
-      "verb": %q
-    }
-  }
-}`, depNamespace, depNamespace, group, resource, verb)
-
-	cmd := exec.CommandContext(context.Background(), kubectlBin,
-		"--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
-		"create", "-f", "-", "-o", "json",
-	)
-	cmd.Stdin = strings.NewReader(sarJSON)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("SAR failed in %s: %s %v", wsPath, buf.String(), err)
-	}
-
-	var sar subjectAccessReview
-	if err := json.Unmarshal(buf.Bytes(), &sar); err != nil {
-		return false, fmt.Errorf("parsing SAR response: %w", err)
-	}
-
-	return sar.Status.Allowed, nil
-}
-
-// applyFixtureToWS applies a YAML fixture to a kcp workspace with placeholder substitution.
+// applyFixtureToWS applies a YAML fixture to a kcp workspace with placeholder
+// substitution. Retries on transient kcp authorization errors that surface
+// while APIExports are propagating across shards (a fresh consumer workspace
+// on a non-root shard cannot bind to a provider's APIExport until kcp has
+// finished publishing the APIExport's APIExportEndpointSlice on that shard).
 func applyFixtureToWS(wsPath, file string, substitutions map[string]string) {
 	GinkgoHelper()
 	raw, err := os.ReadFile(file)
@@ -244,16 +214,22 @@ func applyFixtureToWS(wsPath, file string, substitutions map[string]string) {
 		content = strings.ReplaceAll(content, "${"+k+"}", v)
 	}
 
-	cmd := exec.CommandContext(context.Background(), kubectlBin,
-		"--kubeconfig", kcpHostKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpNodePort, wsPath),
-		"apply", "-f", "-",
-	)
-	cmd.Stdin = strings.NewReader(content)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	Expect(cmd.Run()).To(Succeed(), "applying %s to %s: %s", file, wsPath, buf.String())
+	waitFor(2*time.Minute, fmt.Sprintf("apply %s to %s", file, wsPath), func() error {
+		cmd := exec.CommandContext(context.Background(), kubectlBin,
+			"--kubeconfig", kcpHostKubeconfig,
+			"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsPath),
+			"apply", "-f", "-",
+		)
+		cmd.Stdin = strings.NewReader(content)
+		var buf bytes.Buffer
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%w: %s", err, buf.String())
+		}
+
+		return nil
+	})
 }
 
 // waitFor retries a check function until it succeeds or the timeout is reached.
@@ -280,14 +256,10 @@ func waitFor(timeout time.Duration, desc string, check func() error) {
 	}
 }
 
-// secretField extracts a base64-decoded field from a k8s secret in the kcp namespace.
-func secretField(name, jsonpath string) []byte {
+// kindctlSecret extracts the kubeconfig from a k8s secret in the kcp-system namespace.
+func kindctlSecret(name string) string {
 	GinkgoHelper()
-	out := kindctl("-n", kcpNamespace, "get", "secret", name, "-o", fmt.Sprintf("jsonpath=%s", jsonpath))
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
-	Expect(err).NotTo(HaveOccurred())
-
-	return decoded
+	return kindctl("-n", kcpNamespace, "get", "secret", name, "-o", "jsonpath={.data.kubeconfig}")
 }
 
 var _ = SynchronizedBeforeSuite(func() {
@@ -306,14 +278,17 @@ var _ = SynchronizedBeforeSuite(func() {
 	By("installing cert-manager")
 	installCertManager()
 
-	By("deploying kcp via helm")
-	deployKCP()
+	By("deploying kcp via kcp-operator")
+	deployKCPOperator()
 
-	By("building admin kubeconfigs")
-	buildAdminKubeconfigs()
+	By("deploying etcd instances")
+	deployEtcd()
 
-	By("exposing kcp server via NodePort")
-	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-server-nodeport.yaml"))
+	By("creating kcp RootShard, Shard, and FrontProxy")
+	createKCPResources()
+
+	By("generating admin kubeconfig")
+	buildAdminKubeconfig()
 
 	By("building component kubeconfigs")
 	buildComponentKubeconfigs()
@@ -379,201 +354,648 @@ func installCertManager() {
 	})
 }
 
-func deployKCP() {
+func deployKCPOperator() {
 	_, _ = runNoFail(helmBin, "repo", "add", "kcp", "https://kcp-dev.github.io/helm-charts")
 	run(helmBin, "repo", "update", "kcp")
 
-	run(helmBin, "upgrade", "--install", "kcp", "kcp/kcp",
+	run(helmBin, "upgrade", "--install", "kcp-operator", "kcp/kcp-operator",
 		"--namespace", kcpNamespace,
 		"--create-namespace",
-		"--values", filepath.Join(fixturesDir, "integration-values-kcp.yaml"),
 		"--wait", "--timeout", helmTimeout,
 	)
 }
 
-func buildAdminKubeconfigs() {
-	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-admin-cert.yaml"))
+func deployEtcd() {
+	// Deploy two etcd instances: one for the root shard, one for the secondary shard.
+	for _, name := range []string{"etcd-root", "etcd-shard"} {
+		applyEtcd(name)
+	}
 
-	waitFor(time.Minute, "front-proxy admin cert issued", func() error {
-		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-admin-front-proxy-cert",
-			"-o", "jsonpath={.data.tls\\.crt}")
+	// Wait for etcd pods to be ready.
+	for _, name := range []string{"etcd-root", "etcd-shard"} {
+		waitFor(2*time.Minute, fmt.Sprintf("%s ready", name), func() error {
+			_, err := kindctlNoFail("-n", kcpNamespace, "wait", "statefulset", name,
+				"--for=jsonpath={.status.readyReplicas}=1", "--timeout=1s")
+
+			return err
+		})
+	}
+}
+
+// applyEtcd creates a minimal single-node etcd instance in the kcp namespace.
+func applyEtcd(name string) {
+	GinkgoHelper()
+	manifest := fmt.Sprintf(`---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: etcd
+    app.kubernetes.io/instance: %[1]s
+  ports:
+    - name: client
+      port: 2379
+      targetPort: client
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %[1]s-headless
+  namespace: %[2]s
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: etcd
+    app.kubernetes.io/instance: %[1]s
+  ports:
+    - name: client
+      port: 2379
+      targetPort: client
+    - name: peer
+      port: 2380
+      targetPort: peer
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: etcd
+      app.kubernetes.io/instance: %[1]s
+  serviceName: %[1]s-headless
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: etcd
+        app.kubernetes.io/instance: %[1]s
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: etcd
+          image: quay.io/coreos/etcd:v3.5.21
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/etcd"]
+          args:
+            - --name=$(HOSTNAME)
+            - --data-dir=/data
+            - --listen-peer-urls=http://0.0.0.0:2380
+            - --listen-client-urls=http://0.0.0.0:2379
+            - --advertise-client-urls=http://$(HOSTNAME).%[1]s-headless.%[2]s.svc.cluster.local:2379
+            - --initial-cluster-state=new
+            - --initial-cluster-token=$(HOSTNAME)
+            - --initial-cluster=$(HOSTNAME)=http://$(HOSTNAME).%[1]s-headless.%[2]s.svc.cluster.local:2380
+            - --initial-advertise-peer-urls=http://$(HOSTNAME).%[1]s-headless.%[2]s.svc.cluster.local:2380
+            - --listen-metrics-urls=http://0.0.0.0:8080
+          env:
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: client
+              containerPort: 2379
+            - name: peer
+              containerPort: 2380
+            - name: metrics
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+`, name, kcpNamespace)
+
+	cmd := exec.CommandContext(context.Background(), kubectlBin,
+		"--context", "kind-"+kindClusterName, "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	Expect(cmd.Run()).To(Succeed(), "applying etcd %s: %s", name, buf.String())
+}
+
+func createKCPResources() {
+	// The front-proxy hostname used for in-cluster access and via NodePort.
+	fpHostname := fmt.Sprintf("kcp-front-proxy.%s.svc.cluster.local", kcpNamespace)
+
+	// Create a cert-manager Issuer in the kcp namespace for kcp-operator PKI.
+	applyToKind(fmt.Sprintf(`apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned
+  namespace: %s
+spec:
+  selfSigned: {}`, kcpNamespace))
+
+	// Create RootShard. certificateTemplates adds localhost to the server cert
+	// so we can port-forward to the shard for direct access during bootstrap.
+	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
+kind: RootShard
+metadata:
+  name: root
+  namespace: %[1]s
+spec:
+  external:
+    hostname: %[2]s
+    port: 6443
+  certificates:
+    issuerRef:
+      group: cert-manager.io
+      kind: Issuer
+      name: selfsigned
+  certificateTemplates:
+    server:
+      spec:
+        dnsNames:
+          - localhost
+        ipAddresses:
+          - "127.0.0.1"
+  cache:
+    embedded:
+      enabled: true
+  etcd:
+    endpoints:
+      - http://etcd-root.%[1]s.svc.cluster.local:2379
+  auth:
+    serviceAccount:
+      enabled: true
+  deploymentTemplate:
+    spec:
+      template:
+        spec:
+          hostAliases:
+            - ip: "10.96.200.200"
+              hostnames:
+                - "%[2]s"`, kcpNamespace, fpHostname))
+
+	// Create FrontProxy with a fixed ClusterIP and NodePort for host access.
+	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
+kind: FrontProxy
+metadata:
+  name: kcp
+  namespace: %[1]s
+spec:
+  rootShard:
+    ref:
+      name: root
+  auth:
+    serviceAccount:
+      enabled: true
+  serviceTemplate:
+    spec:
+      type: NodePort
+      clusterIP: "10.96.200.200"
+  certificateTemplates:
+    server:
+      spec:
+        dnsNames:
+          - localhost
+          - "%[2]s"
+        ipAddresses:
+          - "127.0.0.1"`, kcpNamespace, fpHostname))
+
+	// Wait for the RootShard to be running.
+	waitFor(3*time.Minute, "root shard running", func() error {
+		out, err := kindctlNoFail("-n", kcpNamespace, "get", "rootshard", "root",
+			"-o", "jsonpath={.status.phase}")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(out) != "Running" {
+			return fmt.Errorf("root shard phase: %s", out)
+		}
+
+		return nil
+	})
+
+	// Wait for the FrontProxy to be running.
+	waitFor(2*time.Minute, "front-proxy running", func() error {
+		out, err := kindctlNoFail("-n", kcpNamespace, "get", "frontproxy", "kcp",
+			"-o", "jsonpath={.status.phase}")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(out) != "Running" {
+			return fmt.Errorf("front-proxy phase: %s", out)
+		}
+
+		return nil
+	})
+
+	// Patch the front-proxy Service to use a fixed NodePort.
+	kindctl("-n", kcpNamespace, "patch", "service", "kcp-front-proxy", "--type=json",
+		fmt.Sprintf(`-p=[{"op":"replace","path":"/spec/ports/0/nodePort","value":%s}]`, frontProxyNodePort))
+
+	// Create secondary Shard with localhost in server cert for port-forward access.
+	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
+kind: Shard
+metadata:
+  name: shard1
+  namespace: %[1]s
+spec:
+  rootShard:
+    ref:
+      name: root
+  etcd:
+    endpoints:
+      - http://etcd-shard.%[1]s.svc.cluster.local:2379
+  auth:
+    serviceAccount:
+      enabled: true
+  certificateTemplates:
+    server:
+      spec:
+        dnsNames:
+          - localhost
+        ipAddresses:
+          - "127.0.0.1"
+  deploymentTemplate:
+    spec:
+      template:
+        spec:
+          hostAliases:
+            - ip: "10.96.200.200"
+              hostnames:
+                - "%[2]s"`, kcpNamespace, fpHostname))
+
+	// Wait for the secondary shard to be running.
+	waitFor(3*time.Minute, "shard1 running", func() error {
+		out, err := kindctlNoFail("-n", kcpNamespace, "get", "shard", "shard1",
+			"-o", "jsonpath={.status.phase}")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(out) != "Running" {
+			return fmt.Errorf("shard1 phase: %s", out)
+		}
+
+		return nil
+	})
+}
+
+func buildAdminKubeconfig() {
+	// Create a Kubeconfig CR for admin access via front-proxy.
+	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
+kind: Kubeconfig
+metadata:
+  name: e2e-admin
+  namespace: %s
+spec:
+  username: kcp-admin
+  groups:
+    - "system:kcp:admin"
+  validity: 8766h
+  secretRef:
+    name: e2e-admin-kubeconfig
+  target:
+    frontProxyRef:
+      name: kcp`, kcpNamespace))
+
+	// Wait for the kubeconfig secret to be created.
+	waitFor(2*time.Minute, "admin kubeconfig secret created", func() error {
+		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "e2e-admin-kubeconfig",
+			"-o", "jsonpath={.data.kubeconfig}")
 
 		return err
 	})
 
-	// Extract front-proxy client certs for host kubeconfig.
-	fpClientCrt := secretField("kcp-admin-front-proxy-cert", "{.data.tls\\.crt}")
-	fpClientKey := secretField("kcp-admin-front-proxy-cert", "{.data.tls\\.key}")
+	// Extract the kubeconfig and rewrite the server URL to use localhost NodePort.
+	kcRaw := kindctlSecret("e2e-admin-kubeconfig")
+	kcBytes, err := decodeBase64(kcRaw)
+	Expect(err).NotTo(HaveOccurred())
 
-	fpCrtFile := filepath.Join(tmpDir, "fp-client.crt")
-	fpKeyFile := filepath.Join(tmpDir, "fp-client.key")
-	Expect(os.WriteFile(fpCrtFile, fpClientCrt, 0o600)).To(Succeed())
-	Expect(os.WriteFile(fpKeyFile, fpClientKey, 0o600)).To(Succeed())
+	// Extract the actual server URL from the kubeconfig rather than hardcoding the port.
+	adminServerURL := extractServerFromKubeconfig(kcBytes)
+	rewritten := strings.ReplaceAll(string(kcBytes),
+		adminServerURL,
+		fmt.Sprintf("https://localhost:%s", frontProxyNodePort))
 
-	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig, "config", "set-cluster", "kcp",
-		"--server=https://localhost:"+kcpNodePort,
-		"--insecure-skip-tls-verify=true")
-	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig, "config", "set-credentials", "kcp-admin",
-		"--client-certificate="+fpCrtFile,
-		"--client-key="+fpKeyFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig, "config", "set-context", "kcp",
-		"--cluster=kcp", "--user=kcp-admin")
-	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig, "config", "use-context", "kcp")
+	Expect(os.WriteFile(kcpHostKubeconfig, []byte(rewritten), 0o600)).To(Succeed())
 
-	waitFor(30*time.Second, "kcp API reachable", func() error {
-		_, err := runNoFail(kubectlBin, "--kubeconfig", kcpHostKubeconfig, "get", "--raw", "/readyz")
+	waitFor(30*time.Second, "kcp API reachable via front-proxy", func() error {
+		_, err := runNoFail(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
+			"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
+			"get", "--raw", "/readyz")
+
 		return err
 	})
 }
 
-// buildComponentKubeconfigs creates per-component client certificates and
-// kubeconfigs for the controller and webhook. Each component gets a
-// least-privilege identity instead of shared admin credentials.
+// buildComponentKubeconfigs creates Kubeconfig CRs for the controller and webhook
+// identities, then extracts the generated kubeconfigs pointing at the in-cluster
+// front-proxy for use by deployed pods.
 func buildComponentKubeconfigs() {
-	// Apply cert requests for controller and webhook identities.
-	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-controller-cert.yaml"))
-	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-webhook-sa-cert.yaml"))
+	depCtrlPath := "root:" + wsDepCtrl
 
-	waitFor(time.Minute, "controller cert issued", func() error {
-		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-controller-cert",
-			"-o", "jsonpath={.data.tls\\.crt}")
+	// Controller and webhook kubeconfigs target the root shard (not the front-proxy)
+	// so their client certificates are signed by root-client-ca. This CA is trusted by
+	// both the front-proxy (via kcp-merged-client-ca) and all shards directly. This is
+	// required because the multicluster-provider connects to APIExport virtual workspace
+	// URLs that point directly at shards, not through the front-proxy.
+	// The server URL is rewritten below to point at the front-proxy.
+	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
+kind: Kubeconfig
+metadata:
+  name: e2e-controller
+  namespace: %[1]s
+spec:
+  username: "system:serviceaccount:%[2]s:dependency-controller"
+  groups:
+    - "system:authenticated"
+    - "system:serviceaccounts"
+    - "system:serviceaccounts:%[2]s"
+  validity: 8766h
+  secretRef:
+    name: e2e-controller-kubeconfig
+  target:
+    rootShardRef:
+      name: root`, kcpNamespace, depNamespace))
 
-		return err
-	})
-	waitFor(time.Minute, "webhook SA cert issued", func() error {
-		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-webhook-sa-cert",
-			"-o", "jsonpath={.data.tls\\.crt}")
+	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
+kind: Kubeconfig
+metadata:
+  name: e2e-webhook
+  namespace: %[1]s
+spec:
+  username: "system:serviceaccount:%[2]s:dependency-webhook"
+  groups:
+    - "system:authenticated"
+    - "system:serviceaccounts"
+    - "system:serviceaccounts:%[2]s"
+  validity: 8766h
+  secretRef:
+    name: e2e-webhook-kubeconfig
+  target:
+    rootShardRef:
+      name: root`, kcpNamespace, depNamespace))
 
-		return err
-	})
+	// Wait for both kubeconfig secrets.
+	for _, name := range []string{"e2e-controller-kubeconfig", "e2e-webhook-kubeconfig"} {
+		waitFor(2*time.Minute, fmt.Sprintf("%s secret created", name), func() error {
+			_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", name,
+				"-o", "jsonpath={.data.kubeconfig}")
 
-	kcpServerCA := secretField("kcp-ca", "{.data.tls\\.crt}")
-	caFile := filepath.Join(tmpDir, "kcp-server-ca.crt")
-	Expect(os.WriteFile(caFile, kcpServerCA, 0o600)).To(Succeed())
+			return err
+		})
+	}
 
-	kcpInternalServer := fmt.Sprintf("https://kcp.%s.svc.cluster.local:6443/clusters/root:%s", kcpNamespace, wsDepCtrl)
+	// The kubeconfigs target the root shard. Extract the shard URL and rewrite
+	// it to the front-proxy URL with the dep-ctrl workspace path. The client cert
+	// from root-client-ca works for both front-proxy and direct shard access.
+	fpHostname := fmt.Sprintf("kcp-front-proxy.%s.svc.cluster.local", kcpNamespace)
+	kcRaw := kindctlSecret("e2e-controller-kubeconfig")
+	kcBytes, err := decodeBase64(kcRaw)
+	Expect(err).NotTo(HaveOccurred())
+	shardURL := extractServerFromKubeconfig(kcBytes)
 
-	// Build controller kubeconfig.
-	ctrlCrt := secretField("kcp-controller-cert", "{.data.tls\\.crt}")
-	ctrlKey := secretField("kcp-controller-cert", "{.data.tls\\.key}")
-	ctrlCrtFile := filepath.Join(tmpDir, "ctrl-client.crt")
-	ctrlKeyFile := filepath.Join(tmpDir, "ctrl-client.key")
-	Expect(os.WriteFile(ctrlCrtFile, ctrlCrt, 0o600)).To(Succeed())
-	Expect(os.WriteFile(ctrlKeyFile, ctrlKey, 0o600)).To(Succeed())
+	// Determine the front-proxy port from the shard URL (both use 6443).
+	parsed, err := url.Parse(shardURL)
+	Expect(err).NotTo(HaveOccurred())
+	fpPort := parsed.Port()
+	if fpPort == "" {
+		fpPort = "6443"
+	}
+	inClusterFPURL = "https://" + net.JoinHostPort(fpHostname, fpPort)
+	depCtrlURL := inClusterFPURL + "/clusters/" + depCtrlPath
 
+	// Rewrite kubeconfigs: shard URL -> front-proxy + workspace path.
 	controllerKubeconfigPath = filepath.Join(tmpDir, "kcp-controller.kubeconfig")
-	run(kubectlBin, "--kubeconfig", controllerKubeconfigPath, "config", "set-cluster", "kcp",
-		"--server="+kcpInternalServer,
-		"--certificate-authority="+caFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", controllerKubeconfigPath, "config", "set-credentials", "controller",
-		"--client-certificate="+ctrlCrtFile,
-		"--client-key="+ctrlKeyFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", controllerKubeconfigPath, "config", "set-context", "kcp",
-		"--cluster=kcp", "--user=controller")
-	run(kubectlBin, "--kubeconfig", controllerKubeconfigPath, "config", "use-context", "kcp")
-
-	// Build webhook kubeconfig.
-	whCrt := secretField("kcp-webhook-sa-cert", "{.data.tls\\.crt}")
-	whKey := secretField("kcp-webhook-sa-cert", "{.data.tls\\.key}")
-	whCrtFile := filepath.Join(tmpDir, "webhook-client.crt")
-	whKeyFile := filepath.Join(tmpDir, "webhook-client.key")
-	Expect(os.WriteFile(whCrtFile, whCrt, 0o600)).To(Succeed())
-	Expect(os.WriteFile(whKeyFile, whKey, 0o600)).To(Succeed())
+	extractAndRewriteKubeconfig("e2e-controller-kubeconfig", controllerKubeconfigPath,
+		shardURL, depCtrlURL)
 
 	webhookKubeconfigPath = filepath.Join(tmpDir, "kcp-webhook.kubeconfig")
-	run(kubectlBin, "--kubeconfig", webhookKubeconfigPath, "config", "set-cluster", "kcp",
-		"--server="+kcpInternalServer,
-		"--certificate-authority="+caFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", webhookKubeconfigPath, "config", "set-credentials", "webhook",
-		"--client-certificate="+whCrtFile,
-		"--client-key="+whKeyFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", webhookKubeconfigPath, "config", "set-context", "kcp",
-		"--cluster=kcp", "--user=webhook")
-	run(kubectlBin, "--kubeconfig", webhookKubeconfigPath, "config", "use-context", "kcp")
+	extractAndRewriteKubeconfig("e2e-webhook-kubeconfig", webhookKubeconfigPath,
+		shardURL, depCtrlURL)
 }
 
-// bootstrapRBAC uses the bootstrap (system:masters) cert to create
-// RBAC for the controller and webhook identities.
-// - Root workspace: workspace access, webhook/RBAC management, APIExport content
-// - Dep-ctrl workspace: APIExportEndpointSlice read for VW URL discovery
-func bootstrapRBAC() {
-	kindctl("apply", "-f", filepath.Join(fixturesDir, "kcp-bootstrap-cert.yaml"))
+// extractAndRewriteKubeconfig extracts a kubeconfig from a secret, rewrites the
+// server URL, and writes it to the given path.
+func extractAndRewriteKubeconfig(secretName, outputPath, oldURL, newURL string) {
+	GinkgoHelper()
+	kcRaw := kindctlSecret(secretName)
+	kcBytes, err := decodeBase64(kcRaw)
+	Expect(err).NotTo(HaveOccurred())
 
-	waitFor(time.Minute, "bootstrap cert issued", func() error {
-		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", "kcp-bootstrap-cert",
-			"-o", "jsonpath={.data.tls\\.crt}")
+	rewritten := string(kcBytes)
+
+	// kcp-operator generates two contexts: "base" (bare front-proxy URL) and
+	// "default" (front-proxy URL + /clusters/root). We rewrite the base URL to
+	// include the workspace path, but this corrupts the "default" entry with a
+	// double /clusters/ path. Switch to the "base" context which has the correct URL.
+	rewritten = strings.ReplaceAll(rewritten, oldURL, newURL)
+	rewritten = strings.ReplaceAll(rewritten, "current-context: default", "current-context: base")
+
+	Expect(os.WriteFile(outputPath, []byte(rewritten), 0o600)).To(Succeed())
+}
+
+// decodeBase64 decodes a base64-encoded string.
+func decodeBase64(s string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+}
+
+// bootstrapRBAC creates RBAC for the controller and webhook identities.
+// The webhook's broad get/list rule must be applied in system:admin on every
+// shard hosting consumer workspaces — the BootstrapPolicyAuthorizer reads
+// RBAC from the local shard's system:admin only ("the policy defined in
+// this workspace applies to every workspace in a kcp shard"; kcp source
+// pkg/authorization/bootstrap_policy_authorizer.go), so per-shard application
+// is required. Controller rules and dep-ctrl APIExport access live in the
+// root and dep-ctrl workspaces and go via the front-proxy.
+func bootstrapRBAC() {
+	// Webhook get/list, applied in system:admin on every shard via direct
+	// (port-forwarded) shard access.
+	applySystemAdminRBAC("root", "rootShardRef")
+	applySystemAdminRBAC("shard1", "shardRef")
+
+	// Controller-only RBAC in the root workspace via front-proxy.
+	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
+		"apply", "-f", filepath.Join(fixturesDir, "root-rbac-bootstrap.yaml"))
+
+	// Controller + webhook access to the dep-ctrl APIExport via front-proxy.
+	run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", frontProxyNodePort, wsDepCtrl),
+		"apply", "-f", filepath.Join(fixturesDir, "depctrl-rbac-bootstrap.yaml"))
+}
+
+// applySystemAdminRBAC creates a system:masters kubeconfig targeting the
+// given shard, port-forwards that shard's service to localhost, applies the
+// system:admin RBAC fixture there, then tears down the port-forward.
+//
+// refField selects the kcp-operator Kubeconfig target field: "rootShardRef"
+// for the root shard, "shardRef" for any secondary shard.
+func applySystemAdminRBAC(shardName, refField string) {
+	GinkgoHelper()
+
+	kubeconfigName := "e2e-" + shardName + "-system-masters"
+	secretName := kubeconfigName + "-kubeconfig"
+
+	// Create a Kubeconfig CR with the appropriate shard target + system:masters
+	// group. The front-proxy does not honor system:masters, so we must hit the
+	// shard directly. The shard's server cert already includes localhost /
+	// 127.0.0.1 (see the certificateTemplates on the RootShard / Shard CRs).
+	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
+kind: Kubeconfig
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  username: e2e-system-masters
+  groups:
+    - "system:masters"
+  validity: 8766h
+  secretRef:
+    name: %[3]s
+  target:
+    %[4]s:
+      name: %[5]s`, kubeconfigName, kcpNamespace, secretName, refField, shardName))
+
+	waitFor(2*time.Minute, fmt.Sprintf("%s secret created", secretName), func() error {
+		_, err := kindctlNoFail("-n", kcpNamespace, "get", "secret", secretName,
+			"-o", "jsonpath={.data.kubeconfig}")
 
 		return err
 	})
 
-	bsCrt := secretField("kcp-bootstrap-cert", "{.data.tls\\.crt}")
-	bsKey := secretField("kcp-bootstrap-cert", "{.data.tls\\.key}")
-	kcpServerCA := secretField("kcp-ca", "{.data.tls\\.crt}")
+	kcRaw := kindctlSecret(secretName)
+	kcBytes, err := decodeBase64(kcRaw)
+	Expect(err).NotTo(HaveOccurred())
+	shardURL := extractServerFromKubeconfig(kcBytes)
 
-	bsCrtFile := filepath.Join(tmpDir, "bootstrap-client.crt")
-	bsKeyFile := filepath.Join(tmpDir, "bootstrap-client.key")
-	caFile := filepath.Join(tmpDir, "kcp-server-ca.crt")
-	Expect(os.WriteFile(bsCrtFile, bsCrt, 0o600)).To(Succeed())
-	Expect(os.WriteFile(bsKeyFile, bsKey, 0o600)).To(Succeed())
-	Expect(os.WriteFile(caFile, kcpServerCA, 0o600)).To(Succeed())
+	parsed, err := url.Parse(shardURL)
+	Expect(err).NotTo(HaveOccurred())
+	shardSvc := strings.SplitN(parsed.Hostname(), ".", 2)[0]
+	shardPort := parsed.Port()
+	if shardPort == "" {
+		shardPort = "6443"
+	}
 
-	// Build a temporary bootstrap kubeconfig targeting root via kcp server NodePort.
-	bsKubeconfig := filepath.Join(tmpDir, "kcp-bootstrap.kubeconfig")
-	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "set-cluster", "kcp",
-		fmt.Sprintf("--server=https://localhost:%s/clusters/root", kcpServerLocalPort),
-		"--certificate-authority="+caFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "set-credentials", "bootstrap",
-		"--client-certificate="+bsCrtFile,
-		"--client-key="+bsKeyFile,
-		"--embed-certs=true")
-	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "set-context", "kcp",
-		"--cluster=kcp", "--user=bootstrap")
-	run(kubectlBin, "--kubeconfig", bsKubeconfig, "config", "use-context", "kcp")
+	localPort := pickFreePort()
+	rewritten := strings.ReplaceAll(string(kcBytes),
+		shardURL, fmt.Sprintf("https://localhost:%d", localPort))
+	rewritten = strings.ReplaceAll(rewritten,
+		"current-context: default", "current-context: base")
+	sysKubeconfig := filepath.Join(tmpDir, kubeconfigName+".kubeconfig")
+	Expect(os.WriteFile(sysKubeconfig, []byte(rewritten), 0o600)).To(Succeed())
 
-	// Apply RBAC in the root workspace.
-	run(kubectlBin, "--kubeconfig", bsKubeconfig, "apply", "-f",
-		filepath.Join(fixturesDir, "root-rbac-bootstrap.yaml"))
+	// Start port-forward in the background. kubectl port-forward exits when
+	// stdin closes; we kill it explicitly via defer.
+	pfCmd := exec.CommandContext(context.Background(), kubectlBin,
+		"--context", "kind-"+kindClusterName,
+		"-n", kcpNamespace, "port-forward",
+		"svc/"+shardSvc, fmt.Sprintf("%d:%s", localPort, shardPort))
+	pfCmd.Stdout = GinkgoWriter
+	pfCmd.Stderr = GinkgoWriter
+	Expect(pfCmd.Start()).To(Succeed())
+	defer func() {
+		_ = pfCmd.Process.Kill()
+		_, _ = pfCmd.Process.Wait()
+	}()
 
-	// Apply RBAC in the dep-ctrl workspace (apiexportendpointslices read).
-	run(kubectlBin, "--kubeconfig", bsKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/root:%s", kcpServerLocalPort, wsDepCtrl),
-		"apply", "-f", filepath.Join(fixturesDir, "depctrl-rbac-bootstrap.yaml"))
+	waitFor(30*time.Second, fmt.Sprintf("%s reachable via port-forward", shardSvc), func() error {
+		_, err := runNoFail(kubectlBin, "--kubeconfig", sysKubeconfig,
+			"--server", fmt.Sprintf("https://localhost:%d/clusters/system:admin", localPort),
+			"get", "--raw", "/readyz")
 
-	// Apply shard-wide RBAC in system:admin (apiexports/content + apiexportendpointslices for webhook SA).
-	// The Bootstrap Policy Authorizer evaluates system:admin RBAC for every request on the shard.
-	run(kubectlBin, "--kubeconfig", bsKubeconfig,
-		"--server", fmt.Sprintf("https://localhost:%s/clusters/system:admin", kcpServerLocalPort),
-		"apply", "-f", filepath.Join(fixturesDir, "shard-admin-rbac-bootstrap.yaml"))
+		return err
+	})
+
+	// --validate=false: system:admin does not serve OpenAPI, so client-side
+	// schema validation has nothing to compare against.
+	run(kubectlBin, "--kubeconfig", sysKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%d/clusters/system:admin", localPort),
+		"apply", "--validate=false",
+		"-f", filepath.Join(fixturesDir, "system-admin-rbac-bootstrap.yaml"))
 }
 
+// pickFreePort asks the kernel for a free TCP port on localhost.
+func pickFreePort() int {
+	GinkgoHelper()
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+	port := listener.Addr().(*net.TCPAddr).Port
+	Expect(listener.Close()).To(Succeed())
+
+	return port
+}
+
+// extractServerFromKubeconfig extracts the server URL from a kubeconfig YAML.
+func extractServerFromKubeconfig(kubeconfig []byte) string {
+	// Simple regex extraction — avoids pulling in k8s.io/client-go/tools/clientcmd.
+	re := regexp.MustCompile(`server:\s*(https?://\S+)`)
+	m := re.FindSubmatch(kubeconfig)
+	if len(m) < 2 {
+		Fail("could not extract server URL from kubeconfig")
+	}
+
+	return string(m[1])
+}
+
+// portForwardRe matches the "Forwarding from 127.0.0.1:PORT -> ..." line.
 func buildAndLoadImage() {
 	run(dockerBin, "build", "-t", imageName, rootDir)
 	run(kindBin, "load", "docker-image", imageName, "--name", kindClusterName)
 }
 
 func setupKCPWorkspaces() {
-	// Create all workspaces.
-	for _, ws := range []string{wsDepCtrl, wsNetworkProvider, wsComputeProvider, wsConsumer1, wsConsumer2} {
-		cmd := exec.CommandContext(context.Background(), kubectlBin,
-			"--kubeconfig", kcpHostKubeconfig,
-			"--server", fmt.Sprintf("https://localhost:%s/clusters/root", kcpNodePort),
-			"apply", "-f", "-",
-		)
-		cmd.Stdin = strings.NewReader(fmt.Sprintf(`apiVersion: tenancy.kcp.io/v1alpha1
-kind: Workspace
-metadata:
-  name: %s`, ws))
-		var buf bytes.Buffer
-		cmd.Stdout = &buf
-		cmd.Stderr = &buf
-		cmd.Run() //nolint:errcheck // ignore AlreadyExists
+	// Label both shards so we can pin workspaces deterministically. The
+	// kcp-operator registers a kcp Shard object named after each CR. Each
+	// workspace is then pinned via spec.location.selector.matchLabels using
+	// the active config below.
+	for _, shard := range []string{"root", "shard1"} {
+		waitFor(time.Minute, fmt.Sprintf("shard %s kcp object exists", shard), func() error {
+			_, err := kcpctlRootNoFail("get", "shard", shard)
+			return err
+		})
+		run(kubectlBin, "--kubeconfig", kcpHostKubeconfig,
+			"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
+			"label", "shard", shard, "e2e-target="+shard, "--overwrite")
 	}
+
+	// Create workspaces with the placement dictated by the active shard config.
+	createWorkspace(wsDepCtrl, activeShardConfig.depCtrl)
+	createWorkspace(wsNetworkProvider, activeShardConfig.networkProvider)
+	createWorkspace(wsComputeProvider, activeShardConfig.computeProvider)
+	createWorkspace(wsConsumer1, activeShardConfig.consumer1)
+	createWorkspace(wsConsumer2, activeShardConfig.consumer2)
 
 	// Wait for workspaces to be ready.
 	for _, ws := range []string{wsDepCtrl, wsNetworkProvider, wsComputeProvider, wsConsumer1, wsConsumer2} {
@@ -589,6 +1011,11 @@ metadata:
 			return nil
 		})
 	}
+
+	// Verify each workspace landed on the shard the active config pinned
+	// it to. Pinning is the assertion — if scheduling ignored a selector,
+	// later cross-shard tests would silently degrade to single-shard.
+	verifyShardPlacements()
 
 	// Apply schemas and exports.
 	kcpctl(wsDepCtrl, "apply", "-f", filepath.Join(rootDir, "config/kcp/apiresourceschema-dependencyrules.dependencies.opendefense.cloud.yaml"))
@@ -643,6 +1070,100 @@ metadata:
 	}
 }
 
+// verifyShardPlacements asserts that each workspace landed on the shard the
+// active config pinned it to. The shard placement is exposed via the
+// internal.tenancy.kcp.io/shard annotation; the annotation value is the
+// shard's logical-cluster ID (not its name), so we infer the name→ID
+// mapping from the placements themselves and then check consistency:
+// workspaces sharing a target name must share an ID, and distinct targets
+// must resolve to distinct IDs.
+func verifyShardPlacements() {
+	GinkgoHelper()
+	expected := map[string]string{
+		wsDepCtrl:         activeShardConfig.depCtrl,
+		wsNetworkProvider: activeShardConfig.networkProvider,
+		wsComputeProvider: activeShardConfig.computeProvider,
+		wsConsumer1:       activeShardConfig.consumer1,
+		wsConsumer2:       activeShardConfig.consumer2,
+	}
+
+	const shardAnnotation = "internal.tenancy.kcp.io/shard"
+	jsonpath := fmt.Sprintf(`jsonpath={.metadata.annotations.%s}`,
+		strings.ReplaceAll(shardAnnotation, ".", `\.`))
+
+	waitFor(time.Minute, "shard placements match active config", func() error {
+		actual := make(map[string]string, len(expected))
+		for ws := range expected {
+			out, err := kcpctlRootNoFail("get", "workspace", ws, "-o", jsonpath)
+			if err != nil {
+				return err
+			}
+			id := strings.TrimSpace(out)
+			if id == "" {
+				return fmt.Errorf("workspace %s shard annotation not yet set", ws)
+			}
+			actual[ws] = id
+		}
+
+		// Build name→ID mapping from observations; flag mismatches in the
+		// same group (same target name, different IDs) and across groups
+		// (different target names, same ID — selector ignored).
+		nameToID := map[string]string{}
+		for ws, target := range expected {
+			id := actual[ws]
+			if existing, ok := nameToID[target]; ok && existing != id {
+				return fmt.Errorf("workspaces pinned to %q resolved to multiple shards: %q vs %q (workspace %s)",
+					target, existing, id, ws)
+			}
+			nameToID[target] = id
+		}
+		idToName := map[string]string{}
+		for name, id := range nameToID {
+			if existing, ok := idToName[id]; ok && existing != name {
+				return fmt.Errorf("shards %q and %q both resolved to logical cluster %q — selector ignored",
+					name, existing, id)
+			}
+			idToName[id] = name
+		}
+
+		return nil
+	})
+}
+
+// createWorkspace creates a kcp workspace under root. If shardTarget is non-empty,
+// the workspace is pinned to that shard via spec.location.selector.
+func createWorkspace(name, shardTarget string) {
+	GinkgoHelper()
+	var manifest string
+	if shardTarget != "" {
+		manifest = fmt.Sprintf(`apiVersion: tenancy.kcp.io/v1alpha1
+kind: Workspace
+metadata:
+  name: %s
+spec:
+  location:
+    selector:
+      matchLabels:
+        e2e-target: %s`, name, shardTarget)
+	} else {
+		manifest = fmt.Sprintf(`apiVersion: tenancy.kcp.io/v1alpha1
+kind: Workspace
+metadata:
+  name: %s`, name)
+	}
+
+	cmd := exec.CommandContext(context.Background(), kubectlBin,
+		"--kubeconfig", kcpHostKubeconfig,
+		"--server", fmt.Sprintf("https://localhost:%s/clusters/root", frontProxyNodePort),
+		"apply", "-f", "-",
+	)
+	cmd.Stdin = strings.NewReader(manifest)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	cmd.Run() //nolint:errcheck // ignore AlreadyExists
+}
+
 // createKubeconfigSecret creates or updates a Secret in the dep-ctrl namespace
 // containing the given kubeconfig file.
 func createKubeconfigSecret(secretName, kubeconfigPath string) {
@@ -673,6 +1194,19 @@ func deployCharts() {
 		filepath.Join(rootDir, "charts/dependency-controller"),
 		"--namespace", depNamespace,
 		"--values", filepath.Join(fixturesDir, "integration-values.yaml"),
+		"--set", "kcpBaseHost="+inClusterFPURL,
 		"--wait", "--timeout", "120s",
 	)
+}
+
+// applyToKind applies a YAML manifest to the kind cluster.
+func applyToKind(manifest string) {
+	GinkgoHelper()
+	cmd := exec.CommandContext(context.Background(), kubectlBin,
+		"--context", "kind-"+kindClusterName, "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	Expect(cmd.Run()).To(Succeed(), "applying manifest: %s", buf.String())
 }

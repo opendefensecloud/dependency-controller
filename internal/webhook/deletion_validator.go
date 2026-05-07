@@ -11,12 +11,16 @@ import (
 	"strings"
 
 	"github.com/kcp-dev/logicalcluster/v3"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
+
+	"go.opendefense.cloud/dependency-controller/internal/fieldpath"
 )
 
 const (
@@ -41,8 +45,9 @@ func ReadyzCheck(initialized <-chan struct{}) func(*http.Request) error {
 // DeletionValidator is a validating admission webhook handler that blocks
 // deletion of resources that have active dependents referencing them.
 //
-// It queries indexed caches maintained by the RuleCacheManager's per-rule
-// multicluster managers. No Dependency marker objects are needed.
+// On each DELETE request it constructs a temporary dynamic client scoped to
+// the consumer workspace (via the front-proxy) and lists dependent resources
+// directly, filtering by field path to find references to the deleted resource.
 type DeletionValidator struct {
 	Registry *RuleRegistry
 
@@ -50,6 +55,11 @@ type DeletionValidator struct {
 	// all existing DependencyRules. Until then, DELETE requests are denied
 	// to prevent deletions slipping through before the registry is ready.
 	Initialized <-chan struct{}
+
+	// BaseConfig is the front-proxy REST config without a workspace path.
+	// Per-request clients are created by copying this config and setting
+	// Host to {base}/clusters/{logicalClusterName}.
+	BaseConfig *rest.Config
 }
 
 func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) admission.Response {
@@ -100,40 +110,23 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		return admission.Allowed("")
 	}
 
-	// Query each matching rule's indexed cache for dependents referencing this resource.
+	// Build a dynamic client scoped to the consumer workspace.
+	dynClient, err := v.workspaceClient(clusterName.String())
+	if err != nil {
+		logger.Error(err, "failed to create workspace client")
+		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("creating workspace client: %w", err))
+	}
+
+	// Query each matching rule's dependent resources in the consumer workspace.
 	var blockers []string
 	for _, entry := range entries {
-		if !entry.State.IsReady() {
-			msg := fmt.Sprintf("dependency check unavailable for rule %s: cache warming up, retry later", entry.Key)
-			logger.Info(msg)
-
-			return admission.Denied(msg)
-		}
-
-		cluster, err := entry.State.Manager.GetCluster(ctx, multicluster.ClusterName(clusterName.String()))
+		dependents, err := v.listDependents(ctx, dynClient, entry, req.Name, req.Namespace)
 		if err != nil {
-			// Cluster not known to this rule's manager — no dependents here.
-			logger.V(1).Info("cluster not found in rule manager, skipping", "rule", entry.Key, "cluster", clusterName)
-			continue
+			logger.Error(err, "failed to query dependents", "rule", entry.Key)
+			return admission.Errored(http.StatusInternalServerError, fmt.Errorf("checking dependencies for rule %s: %w", entry.Key, err))
 		}
 
-		// Query the field index for dependents referencing the deleted resource name.
-		// Scoped to the same namespace — cross-namespace references are not supported.
-		list := &unstructured.UnstructuredList{}
-		list.SetGroupVersionKind(entry.State.DependentGVK.GroupVersion().WithKind(entry.State.DependentGVK.Kind + "List"))
-
-		err = cluster.GetCache().List(ctx, list,
-			client.MatchingFields{entry.MatchedField.FieldPath: req.Name},
-			client.InNamespace(req.Namespace),
-		)
-		if err != nil {
-			logger.Error(err, "failed to query indexed cache", "rule", entry.Key)
-			return admission.Errored(http.StatusInternalServerError, fmt.Errorf("failed to check dependencies for rule %s: %w", entry.Key, err))
-		}
-
-		for _, item := range list.Items {
-			blockers = append(blockers, fmt.Sprintf("%s/%s", entry.State.DependentGVK.Kind, item.GetName()))
-		}
+		blockers = append(blockers, dependents...)
 	}
 
 	if len(blockers) > 0 {
@@ -145,6 +138,56 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 	}
 
 	return admission.Allowed("")
+}
+
+// workspaceClient creates a dynamic client targeting a specific workspace
+// through the front-proxy.
+func (v *DeletionValidator) workspaceClient(clusterName string) (dynamic.Interface, error) {
+	cfg := rest.CopyConfig(v.BaseConfig)
+	cfg.Host = fmt.Sprintf("%s/clusters/%s", strings.TrimRight(cfg.Host, "/"), clusterName)
+
+	return dynamic.NewForConfig(cfg)
+}
+
+// listDependents lists dependent resources in the consumer workspace and
+// returns the names of those that reference the deleted resource via the
+// rule's field path.
+func (v *DeletionValidator) listDependents(
+	ctx context.Context,
+	dynClient dynamic.Interface,
+	entry RuleEntry,
+	targetName, namespace string,
+) ([]string, error) {
+	gvr := entry.State.DependentGVR
+
+	var res dynamic.ResourceInterface
+	if namespace != "" {
+		res = dynClient.Resource(gvr).Namespace(namespace)
+	} else {
+		res = dynClient.Resource(gvr)
+	}
+
+	list, err := res.List(ctx, metav1.ListOptions{})
+	if err != nil {
+		// If the dependent resource type doesn't exist in this workspace
+		// (e.g., consumer hasn't bound the provider APIExport), there are
+		// no dependents — allow deletion.
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("listing %s: %w", gvr, err)
+	}
+
+	var blockers []string
+	for _, item := range list.Items {
+		val := fieldpath.Resolve(item.Object, entry.MatchedField.FieldPath)
+		if val == targetName {
+			blockers = append(blockers, fmt.Sprintf("%s/%s", entry.State.DependentGVK.Kind, item.GetName()))
+		}
+	}
+
+	return blockers, nil
 }
 
 // objectFromRequest extracts the unstructured object from the admission

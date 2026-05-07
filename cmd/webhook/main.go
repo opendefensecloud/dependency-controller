@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -26,6 +26,7 @@ import (
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	v1alpha1 "go.opendefense.cloud/dependency-controller/api/v1alpha1"
+	"go.opendefense.cloud/dependency-controller/internal/kcp"
 	"go.opendefense.cloud/dependency-controller/internal/webhook"
 )
 
@@ -41,12 +42,10 @@ func init() {
 
 func main() {
 	var apiExportName string
-	var kcpBaseHost string
 	var webhookPort int
 	var tlsCertDir string
 	var healthProbeBindAddress string
 	flag.StringVar(&apiExportName, "api-export-name", "dependencies.opendefense.cloud", "Name of the dependency-controller's APIExport")
-	flag.StringVar(&kcpBaseHost, "kcp-base-host", "", "Base kcp host URL (without workspace path). If empty, derived from kubeconfig.")
 	flag.IntVar(&webhookPort, "webhook-port", 9443, "Port for the webhook server")
 	flag.StringVar(&tlsCertDir, "tls-cert-dir", "/etc/webhook-tls", "Directory containing tls.crt and tls.key for the webhook server")
 	flag.StringVar(&healthProbeBindAddress, "health-probe-bind-address", ":8081", "Address to bind the health probe endpoint")
@@ -60,14 +59,35 @@ func main() {
 
 	cfg := ctrl.GetConfigOrDie()
 
-	// Derive base config (root kcp URL without workspace path).
-	baseCfg := rest.CopyConfig(cfg)
-	if kcpBaseHost != "" {
-		baseCfg.Host = kcpBaseHost
+	if err := kcp.ValidateKubeconfig(cfg); err != nil {
+		setupLog.Error(err, "invalid kubeconfig")
+		os.Exit(1)
+	}
+
+	// Derive front-proxy base config by stripping the /clusters/... workspace
+	// path from the kubeconfig host. This base URL is used by the webhook to
+	// construct per-request clients targeting specific consumer workspaces.
+	baseCfg, err := kcp.BaseConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to derive front-proxy base URL from kubeconfig")
+		os.Exit(1)
+	}
+
+	// Resolve the APIExportEndpointSlice name for the dep-ctrl's APIExport.
+	directClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create client for endpoint slice discovery")
+		os.Exit(1)
+	}
+
+	ess, err := kcp.FindEndpointSlice(context.Background(), directClient, apiExportName)
+	if err != nil {
+		setupLog.Error(err, "unable to find APIExportEndpointSlice", "apiExport", apiExportName)
+		os.Exit(1)
 	}
 
 	// Create apiexport provider for the dependency-controller's own APIExport.
-	depCtrlProvider, err := apiexport.New(cfg, apiExportName, apiexport.Options{
+	depCtrlProvider, err := apiexport.New(cfg, ess.Name, apiexport.Options{
 		Scheme: scheme,
 	})
 	if err != nil {
@@ -95,7 +115,6 @@ func main() {
 
 	cacheMgr := &webhook.RuleCacheManager{
 		DepCtrlManager: mgr,
-		BaseConfig:     baseCfg,
 		Scheme:         scheme,
 		APIExportName:  apiExportName,
 		Registry:       registry,
@@ -139,6 +158,7 @@ func main() {
 	validator := &webhook.DeletionValidator{
 		Registry:    registry,
 		Initialized: initialized,
+		BaseConfig:  baseCfg,
 	}
 	mgr.GetWebhookServer().Register("/validate", &ctrlwebhook.Admission{Handler: validator})
 

@@ -6,3 +6,4 @@
 *.tgz
 /coverprofile
 common.mk
+/.secrets/

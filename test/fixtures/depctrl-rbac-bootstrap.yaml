@@ -1,20 +1,16 @@
 # RBAC in the dep-ctrl workspace for the dependency-controller.
-# Applied during setup using a bootstrap (system:masters) identity.
+# Applied during setup using a privileged identity (e.g., system:masters).
 #
-# The controller connects to the dep-ctrl workspace to:
+# Both components connect to the dep-ctrl workspace to:
 # 1. Discover the VW URL via APIExportEndpointSlice
 # 2. Access the dep-ctrl APIExport's virtual workspace (apiexports/content)
 #
-# The controller needs full CRUD on apiexports/content because it manages
-# webhooks in binding workspaces via the VW (using permissionClaims).
-#
-# The webhook SA's access is granted shard-wide via system:admin RBAC
-# (see shard-admin-rbac-bootstrap.yaml) instead of per-workspace grants.
+# The controller manages webhooks in binding workspaces via the VW.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: dependency-controller
+  name: dependency-controller-depctrl
 rules:
   - apiGroups: ["apis.kcp.io"]
     resources: ["apiexportendpointslices"]
@@ -27,12 +23,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: dependency-controller
+  name: dependency-controller-depctrl
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: dependency-controller
+  name: dependency-controller-depctrl
 subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: User
     name: "system:serviceaccount:dependency-system:dependency-controller"
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: "system:serviceaccount:dependency-system:dependency-webhook"

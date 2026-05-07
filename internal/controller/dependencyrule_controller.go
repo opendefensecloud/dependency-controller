@@ -10,7 +10,6 @@ import (
 	"sync"
 
 	"github.com/kcp-dev/logicalcluster/v3"
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -35,18 +34,13 @@ type DependencyRuleReconciler struct {
 	// workspaces. Nil if webhook installation is not configured.
 	WebhookInstaller *WebhookInstaller
 
-	// APIExportName is the name of the dep-ctrl APIExport, used to discover
-	// the virtual workspace URL from the APIExportEndpointSlice.
-	APIExportName string
-
-	// BaseConfig is the root kcp REST config (no workspace path suffix).
-	// Used to resolve workspace paths to logical cluster names by listing
-	// Workspace objects in the root workspace.
+	// BaseConfig is the kcp front-proxy REST config (no workspace path suffix).
+	// Used for webhook installation (routed to the correct shard per workspace)
+	// and to resolve workspace paths to logical cluster names.
 	BaseConfig *rest.Config
 
-	// mu protects lazy initialization of vwBaseConfig and wsResolver.
+	// mu protects lazy initialization of wsResolver.
 	mu         sync.Mutex
-	vwBaseCfg  *rest.Config
 	wsResolver *workspaceResolver
 }
 
@@ -56,43 +50,22 @@ func NewDependencyRuleReconciler(depCtrlMgr mcmanager.Manager) *DependencyRuleRe
 	}
 }
 
-// ensureInitialized lazily discovers the VW base URL and creates a workspace
-// resolver. Must be called before using WebhookInstaller.
-func (r *DependencyRuleReconciler) ensureInitialized(ctx context.Context) error {
+// ensureInitialized lazily creates the workspace resolver used to map
+// workspace paths to logical cluster names for webhook installation.
+func (r *DependencyRuleReconciler) ensureInitialized() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.vwBaseCfg != nil {
+	if r.wsResolver != nil {
 		return nil
 	}
 
 	localMgr := r.DepCtrlManager.GetLocalManager()
-	localCfg := localMgr.GetConfig()
 
-	directClient, err := client.New(localCfg, client.Options{Scheme: localMgr.GetScheme()})
-	if err != nil {
-		return fmt.Errorf("creating client for VW URL discovery: %w", err)
-	}
-
-	var ess apisv1alpha1.APIExportEndpointSlice
-	if err := directClient.Get(ctx, client.ObjectKey{Name: r.APIExportName}, &ess); err != nil {
-		return fmt.Errorf("getting APIExportEndpointSlice %s: %w", r.APIExportName, err)
-	}
-
-	if len(ess.Status.APIExportEndpoints) == 0 {
-		return fmt.Errorf("APIExportEndpointSlice %s has no endpoints", r.APIExportName)
-	}
-
-	vwURL := ess.Status.APIExportEndpoints[0].URL
-	r.vwBaseCfg = rest.CopyConfig(localCfg)
-	r.vwBaseCfg.Host = vwURL
-
-	// Create workspace resolver using the base kcp config.
+	// Create workspace resolver using the base kcp config (front-proxy URL).
 	rootCfg := rest.CopyConfig(r.BaseConfig)
 	rootCfg.Host += logicalcluster.NewPath("root").RequestPath()
 	r.wsResolver = &workspaceResolver{rootCfg: rootCfg, scheme: localMgr.GetScheme()}
-
-	log.FromContext(ctx).Info("discovered VW base URL for webhook operations", "url", vwURL)
 
 	return nil
 }
@@ -102,8 +75,8 @@ func (r *DependencyRuleReconciler) ensureInitialized(ctx context.Context) error 
 func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("rule", req.Name, "cluster", req.ClusterName)
 
-	if err := r.ensureInitialized(ctx); err != nil {
-		logger.Error(err, "failed to initialize VW config")
+	if err := r.ensureInitialized(); err != nil {
+		logger.Error(err, "failed to initialize workspace resolver")
 		return ctrl.Result{}, err
 	}
 
@@ -142,22 +115,25 @@ func (r *DependencyRuleReconciler) Reconcile(ctx context.Context, req mcreconcil
 	return ctrl.Result{}, nil
 }
 
-// ensureWebhooks installs webhooks in dependency provider workspaces via the VW.
+// ensureWebhooks installs webhooks in dependency provider workspaces via the virtual workspace.
 func (r *DependencyRuleReconciler) ensureWebhooks(ctx context.Context, ruleKey string, rule *v1alpha1.DependencyRule) error {
-	// Replace workspace paths with logical cluster names for the installer.
-	resolvedRule := rule.DeepCopy()
-	for i := range resolvedRule.Spec.Dependencies {
-		wsPath := resolvedRule.Spec.Dependencies[i].APIExportRef.Path
+	// Build a mapping from workspace path to logical cluster name.
+	clusterNames := make(map[string]string, len(rule.Spec.Dependencies))
+	for _, dep := range rule.Spec.Dependencies {
+		wsPath := dep.APIExportRef.Path
+		if _, ok := clusterNames[wsPath]; ok {
+			continue
+		}
+
 		clusterName, err := r.wsResolver.resolve(wsPath)
 		if err != nil {
 			return fmt.Errorf("resolving %s: %w", wsPath, err)
 		}
-		resolvedRule.Spec.Dependencies[i].APIExportRef.Path = clusterName
+
+		clusterNames[wsPath] = clusterName
 	}
 
-	r.WebhookInstaller.BaseConfig = r.vwBaseCfg
-
-	return r.WebhookInstaller.EnsureWebhooks(ctx, ruleKey, resolvedRule)
+	return r.WebhookInstaller.EnsureWebhooks(ctx, ruleKey, rule, clusterNames)
 }
 
 // collectWorkspacePaths extracts dependency workspace paths referenced in a DependencyRule.
