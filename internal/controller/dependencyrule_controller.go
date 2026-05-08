@@ -62,10 +62,11 @@ func (r *DependencyRuleReconciler) ensureInitialized() error {
 
 	localMgr := r.DepCtrlManager.GetLocalManager()
 
-	// Create workspace resolver using the base kcp config (front-proxy URL).
-	rootCfg := rest.CopyConfig(r.BaseConfig)
-	rootCfg.Host += logicalcluster.NewPath("root").RequestPath()
-	r.wsResolver = &workspaceResolver{rootCfg: rootCfg, scheme: localMgr.GetScheme()}
+	r.wsResolver = &workspaceResolver{
+		baseCfg:   r.BaseConfig,
+		scheme:    localMgr.GetScheme(),
+		newClient: client.New,
+	}
 
 	return nil
 }
@@ -165,8 +166,9 @@ func (r *DependencyRuleReconciler) handleDeletion(ctx context.Context, key, rule
 // workspaceResolver maps kcp workspace paths (e.g., "root:compute-provider")
 // to logical cluster names by reading Workspace objects from the root workspace.
 type workspaceResolver struct {
-	rootCfg *rest.Config
-	scheme  *runtime.Scheme
+	baseCfg   *rest.Config // kcp front-proxy URL without any workspace path suffix
+	scheme    *runtime.Scheme
+	newClient func(cfg *rest.Config, options client.Options) (client.Client, error)
 
 	mu    sync.Mutex
 	cache map[string]string // workspace path -> logical cluster name
@@ -193,27 +195,41 @@ func (w *workspaceResolver) ensureResolved(ctx context.Context, paths []string) 
 		return nil
 	}
 
-	c, err := client.New(w.rootCfg, client.Options{Scheme: w.scheme})
-	if err != nil {
-		return fmt.Errorf("creating root workspace client: %w", err)
-	}
-
 	for _, path := range missing {
-		// Extract the workspace name from path like "root:compute-provider".
-		parts := strings.Split(path, ":")
-		wsName := parts[len(parts)-1]
-
-		var ws tenancyv1alpha1.Workspace
-		if err := c.Get(ctx, client.ObjectKey{Name: wsName}, &ws); err != nil {
-			return fmt.Errorf("getting workspace %s: %w", wsName, err)
+		if _, ok := w.cache[path]; ok {
+			continue
 		}
 
-		if ws.Spec.Cluster == "" {
-			return fmt.Errorf("workspace %s has no logical cluster name", wsName)
+		var parentPath string
+		if i := strings.LastIndex(path, ":"); i >= 0 {
+			parentPath = path[:i]
+		} else {
+			return fmt.Errorf("workspace path %q must have at least one parent segment", path)
 		}
 
-		w.cache[path] = ws.Spec.Cluster
-		log.FromContext(ctx).Info("resolved workspace path", "path", path, "cluster", ws.Spec.Cluster)
+		parentCfg := rest.CopyConfig(w.baseCfg)
+		parentCfg.Host += logicalcluster.NewPath(parentPath).RequestPath()
+
+		c, err := w.newClient(parentCfg, client.Options{Scheme: w.scheme})
+		if err != nil {
+			return fmt.Errorf("creating %s workspace client: %w", parentPath, err)
+		}
+
+		var wsList tenancyv1alpha1.WorkspaceList
+		if err := c.List(ctx, &wsList); err != nil {
+			return fmt.Errorf("list workspaces in %s: %w", parentPath, err)
+		}
+
+		for _, ws := range wsList.Items {
+			if ws.Spec.Cluster == "" {
+				log.FromContext(ctx).Info("skipping workspace with no logical cluster name (still provisioning?)", "workspace", ws.Name, "parent", parentPath)
+				continue
+			}
+
+			wsPath := parentPath + ":" + ws.Name
+			w.cache[wsPath] = ws.Spec.Cluster
+			log.FromContext(ctx).Info("resolved workspace path", "path", wsPath, "cluster", ws.Spec.Cluster)
+		}
 	}
 
 	return nil

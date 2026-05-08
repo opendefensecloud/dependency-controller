@@ -920,7 +920,7 @@ spec:
 	pfCmd := exec.CommandContext(context.Background(), kubectlBin,
 		"--context", "kind-"+kindClusterName,
 		"-n", kcpNamespace, "port-forward",
-		"svc/"+shardSvc, fmt.Sprintf("%d:%s", localPort, shardPort))
+		"svc/"+shardSvc, fmt.Sprintf("%d:%s", localPort, shardPort)) // #nosec G204 -- kubectl is a trusted binary and the arguments are controlled.
 	pfCmd.Stdout = GinkgoWriter
 	pfCmd.Stderr = GinkgoWriter
 	Expect(pfCmd.Start()).To(Succeed())
