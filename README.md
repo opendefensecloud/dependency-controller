@@ -90,8 +90,12 @@ both watch `DependencyRule` objects via the dep-ctrl APIExport:
 
 - Installs `ValidatingWebhookConfiguration` in each provider workspace whose
   resources are protected as dependencies
-- All provider workspace access goes through the dep-ctrl APIExport's virtual
-  workspace, authorized by `permissionClaims` on the APIExport
+- Webhook management goes through the dep-ctrl APIExport's virtual workspace,
+  authorized by the `validatingwebhookconfigurations` `permissionClaim`.
+  Workspace-path resolution (translating `apiExportRef.path` into a logical
+  cluster name) goes through the kcp front-proxy directly, authorized by plain
+  RBAC on `tenancy.kcp.io/workspaces` plus a binding to the kcp-predefined
+  `system:kcp:workspace:access` ClusterRole.
 
 **Webhook** (`cmd/webhook`) -- handles admission:
 
@@ -131,7 +135,7 @@ in those workspaces. Consumer workspaces do not need to bind to the dep-ctrl exp
 
 ```mermaid
 graph LR
-    subgraph DC["Dep-Ctrl Workspace"]
+    subgraph DC["dep-ctrl Workspace"]
         DCExport["APIExport:<br/>DependencyRule<br/><i>+ permissionClaims</i>"]
     end
 
@@ -155,8 +159,8 @@ graph LR
         NPWebhook["ValidatingWebhook"]
     end
 
-    subgraph ROOT["Root Workspace"]
-        ROOTROLE["ClusterRoles<br/>(workspaces/content +<br/>workspace resolution)"]
+    subgraph ROOT["Workspace-resolution RBAC<br/>(typical: root; alt: per-shard system:admin)"]
+        ROOTROLE["ClusterRole binding:<br/>tenancy.kcp.io/workspaces get,list,watch<br/>+ system:kcp:workspace:access"]
     end
 
     subgraph CW["Consumer Workspace"]
@@ -166,9 +170,10 @@ graph LR
 
     CPBinding -->|binds to| DCExport
     NPBinding -->|binds to| DCExport
-    Ctrl -.->|watches rules via VW| DCExport
-    Ctrl -.->|installs webhook via VW| NP
-    WH -.->|watches rules via VW| DCExport
+    Ctrl -.->|watches rules via virtual workspace| DCExport
+    Ctrl -.->|installs webhook via virtual workspace| NP
+    Ctrl -.->|resolves workspace paths<br/>via kcp front-proxy| ROOTROLE
+    WH -.->|watches rules via virtual workspace| DCExport
     NPWebhook -.->|dispatches DELETE to| WH
     WH -.->|on DELETE: lists dependents<br/>via kcp front-proxy| CW
     CWBindings -->|binds to| CPExport
@@ -195,8 +200,8 @@ For development setup and project layout, see [docs/development.md](docs/develop
 
 ### RBAC Model
 
-The system uses static bootstrap RBAC in three kcp locations. No dynamic RBAC is
-created at runtime.
+The system relies on static bootstrap RBAC plus one `permissionClaim` declared
+on the dep-ctrl APIExport. No dynamic RBAC is created at runtime.
 
 #### permissionClaims on the dep-ctrl APIExport
 
@@ -210,20 +215,43 @@ in binding workspaces through the virtual workspace.
 
 #### Bootstrap RBAC (static, applied at deployment)
 
-**Root workspace** -- both components need `workspaces/content` access to enter child
-workspaces. The controller additionally needs `workspaces` read access to resolve
-workspace paths to logical cluster names.
+Three categories of static RBAC must be in place at deployment time:
 
-**Dep-ctrl workspace** -- the controller needs `apiexportendpointslices` read access
-for VW URL discovery and full CRUD on `apiexports/content` to manage webhooks in
-binding workspaces via the VW.
+**Per-shard `system:admin` RBAC (webhook)** -- grants the webhook ServiceAccount
+`*/*` `get,list`. The webhook needs this during admission to list dependent
+resources directly in any consumer workspace via the kcp front-proxy. Because
+kcp's `BootstrapPolicyAuthorizer` reads bindings from each shard's local
+`system:admin` workspace and bindings do not propagate across shards, this
+binding must be applied **once per kcp shard** through a direct (non-front-proxy)
+connection.
 
-No shard-wide RBAC is needed. The webhook watches dependent resources through the
-dep-ctrl APIExport's virtual workspace, authorized by dynamically managed
-permissionClaims. Providers accept these claims in their APIBinding.
+**Workspace-resolution RBAC (controller)** -- the controller needs
+`tenancy.kcp.io/workspaces` `get,list,watch` plus workspace-content access — the
+canonical way is to bind the kcp-predefined `system:kcp:workspace:access`
+ClusterRole, which grants the `access` verb on the non-resource URL `/`. Both
+must be in place in every **parent** of a workspace the controller operates on.
+The controller uses these rules to translate a `DependencyRule`'s
+`apiExportRef.path` (e.g., `root:providers:network`) into the underlying logical
+cluster name. In a typical deployment where provider workspaces live directly
+under `root`, granting them in the `root` workspace is enough; deeper paths need
+the same bindings in each intermediate parent. As an alternative, the bindings
+may be applied in each shard's `system:admin` workspace — those cover every
+workspace on the shard and implicitly satisfy any parent the resolver needs to
+traverse, at the cost of (like the webhook binding above) being applied once per
+shard.
 
-See [docs/getting-started.md](docs/getting-started.md) for the full deployment guide
-using [kcp-operator](https://github.com/kcp-dev/helm-charts).
+**Dep-ctrl workspace RBAC (both components)** -- both binaries need
+`apis.kcp.io/apiexportendpointslices` `get,list,watch` (to discover the dep-ctrl
+APIExport's virtual-workspace URLs) and `apis.kcp.io/apiexports/content` on the
+dep-ctrl APIExport. The controller uses the latter to manage
+`ValidatingWebhookConfiguration` objects in binding workspaces through the
+virtual workspace; the webhook uses it to watch `DependencyRule` objects through
+the same virtual workspace.
+
+Webhook installation in provider workspaces is authorized by the
+`validatingwebhookconfigurations` permissionClaim above, not by RBAC. Dependent
+listing during admission is authorized by the per-shard `system:admin` binding,
+not by the dep-ctrl APIExport.
 
 ## Development
 
