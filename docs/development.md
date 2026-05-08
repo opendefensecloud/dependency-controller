@@ -2,8 +2,38 @@
 
 ## Prerequisites
 
+The recommended setup is the [dev shell](#dev-shell) below — it provides the
+full toolchain. If you're not using Nix, you need:
+
 - Go 1.26+
 - A kcp binary (downloaded automatically by `make kcp`)
+- `golangci-lint`, `helm`, `kind`, `docker`, and `pre-commit` on `$PATH`
+
+## Dev shell
+
+The repo ships a [Nix flake](../flake.nix) wired up via [direnv](https://direnv.net/)
+(see [.envrc](../.envrc)). With both installed, the dev shell auto-loads on `cd`
+and provides Go 1.26.2, `golangci-lint`, `gopls`, `helm`, `kind`, `task`, the kcp
+toolchain, and the rest of the dependencies.
+
+```sh
+direnv allow            # one-time, on first entry
+# or, without direnv:
+nix develop
+```
+
+The shell is defined by [`opendefensecloud/dev-kit`](https://github.com/opendefensecloud/dev-kit)
+via the `dev-kit` flake input — adding tools project-wide is a PR there, not here.
+
+## Pre-commit hooks
+
+```sh
+pre-commit install      # registers the hooks listed in .pre-commit-config.yaml
+```
+
+The configured hooks cover trailing whitespace, YAML/JSON syntax, `yamllint`,
+`shellcheck`, `gofmt`, `go vet`, `go mod tidy`, `golangci-lint` (manual stage),
+and `helm lint`.
 
 ## Project Structure
 
