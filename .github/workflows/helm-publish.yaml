@@ -1,5 +1,7 @@
 name: Publish Helm Chart
 
+permissions: read-all
+
 on:
   release:
     types:
