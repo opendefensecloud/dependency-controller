@@ -1,11 +1,14 @@
-# KCP-aware Dependency Controller
+# kcp-aware Dependency Controller
 
+[![Build status](https://github.com/opendefensecloud/dependency-controller/actions/workflows/golang.yaml/badge.svg)](https://github.com/opendefensecloud/dependency-controller/actions/workflows/golang.yaml)
+[![Go Report Card](https://goreportcard.com/badge/go.opendefense.cloud/dependency-controller)](https://goreportcard.com/report/go.opendefense.cloud/dependency-controller)
+[![Go Reference](https://pkg.go.dev/badge/go.opendefense.cloud/dependency-controller.svg)](https://pkg.go.dev/go.opendefense.cloud/dependency-controller)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/opendefensecloud/dependency-controller/badge)](https://scorecard.dev/viewer/?uri=github.com/opendefensecloud/dependency-controller)
 [![GitHub Release](https://img.shields.io/github/v/release/opendefensecloud/dependency-controller)](https://github.com/opendefensecloud/dependency-controller/releases/latest)
 
 ## Problem Statement
 
-In KCP, APIs can be offered to users via APIExports by a multitude of providers.
+In kcp, APIs can be offered to users via APIExports by a multitude of providers.
 For IaaS services however there is a critical shortcoming:
 IaaS APIs typically depend on each other -- for example, a VM is provisioned in a VPC.
 The VM is dependent on the VPC. If the VPC is deleted, it pulls the rug from under the VM.
@@ -21,13 +24,13 @@ flowchart TD
     A["Provider creates<br/><b>DependencyRule</b><br/>(e.g. VM → VPC)"] --> B["Both binaries discover rule<br/>via dep-ctrl APIExport"]
 
     B --> C["<b>Controller:</b><br/>Install ValidatingWebhook<br/>in dependency provider workspace"]
-    B --> E["<b>Webhook:</b><br/>Start indexed cache watching<br/>dependent type via APIExport VW"]
+    B --> E["<b>Webhook:</b><br/>Register rule metadata<br/>(dependent GVR, field paths)<br/>in RuleRegistry"]
 
-    E --> F["Informer indexes dependents<br/>by field paths<br/>(e.g. .spec.vpcRef.name)"]
+    E --> F["Registry holds rule metadata only<br/>— no cache of dependents"]
 
     F --> G{"Consumer tries to delete<br/>dependency (e.g. VPC)"}
     G --> H["Webhook intercepts DELETE"]
-    H --> I["Query indexed cache:<br/>any VMs where .spec.vpcRef.name = my-vpc?"]
+    H --> I["List VMs in consumer workspace<br/>via kcp front-proxy;<br/>in-memory filter:<br/>.spec.vpcRef.name == my-vpc?"]
     I -- Yes --> J["Deny deletion<br/>'still referenced by VirtualMachine/my-vm'"]
     I -- No --> K["Allow deletion"]
 
@@ -43,8 +46,9 @@ flowchart TD
 
 Along with their APIExport, providers create `DependencyRule` objects to describe how their
 resources depend on others. A single rule attaches to one dependent resource type (via its
-APIExport reference) and lists all of its dependencies with field paths that describe where
-the reference lives:
+APIExport reference in the same workspace as the rule) and lists each dependency together
+with the **dependency provider's** APIExport reference (workspace path + name) and the field
+path inside the dependent resource where the reference lives:
 
 ```yaml
 apiVersion: dependencies.opendefense.cloud/v1alpha1
@@ -57,13 +61,20 @@ spec:
     group: compute.example.com
     version: v1alpha1
     kind: VirtualMachine
+    resource: virtualmachines
   dependencies:
-    - group: network.example.com
+    - apiExportRef:
+        path: root:providers:network
+        name: network.example.com
+      group: network.example.com
       version: v1alpha1
       resource: vpcs
       fieldRef:
         path: ".spec.vpcRef.name"
-    - group: network.example.com
+    - apiExportRef:
+        path: root:providers:network
+        name: network.example.com
+      group: network.example.com
       version: v1alpha1
       resource: subnets
       fieldRef:
@@ -76,32 +87,40 @@ The system runs as two binaries, deployed together via a single Helm chart, that
 both watch `DependencyRule` objects via the dep-ctrl APIExport:
 
 **Controller** (`cmd/controller`) -- handles infrastructure setup:
+
 - Installs `ValidatingWebhookConfiguration` in each provider workspace whose
   resources are protected as dependencies
 - All provider workspace access goes through the dep-ctrl APIExport's virtual
   workspace, authorized by `permissionClaims` on the APIExport
 
 **Webhook** (`cmd/webhook`) -- handles admission:
-- Maintains a dedicated indexed cache per rule, watching the dependent resource
-  type via the provider's APIExport virtual workspace
-- Serves admission requests, querying indexed caches to block deletion of
-  resources that are still referenced
 
-### Indexed Cache
+- Watches `DependencyRule` objects via the dep-ctrl APIExport's virtual
+  workspace and stores parsed metadata (dependent GVR + field paths) in an
+  in-memory `RuleRegistry`.
+- On each DELETE admission request, finds matching rules in the registry,
+  lists dependent resources directly in the consumer workspace via the kcp
+  front-proxy, and filters in-memory by the configured field path to block
+  deletion of still-referenced resources.
 
-For each DependencyRule, the webhook server starts a multicluster manager that watches the
-dependent resource type (e.g., VirtualMachines) via the referenced APIExport's virtual
-workspace. Field indices are registered on the dependent informer for each dependency
-target's field path (e.g., `.spec.vpcRef.name`), enabling O(1) lookups by referenced
-resource name.
+### Rule Registry
+
+The webhook keeps an in-memory `RuleRegistry` populated by reconciling
+`DependencyRule` objects through the dep-ctrl APIExport's virtual workspace.
+Each entry holds rule metadata only — the dependent's GroupVersionResource
+and the field paths that hold dependency references — not the dependent
+resources themselves. Dependent listing happens on demand per admission
+request (see [Admission Webhook](#admission-webhook) below).
 
 ### Admission Webhook
 
-A KCP ValidatingAdmissionWebhook intercepts DELETE requests. When a delete is attempted,
-the webhook queries the indexed caches to find dependent resources that reference the
-resource being deleted. If any are found, the request is denied with a clear error message
-listing the dependents. Finalizers are intentionally avoided as they conflict with KCP's
-sync-agent.
+A kcp ValidatingAdmissionWebhook intercepts DELETE requests. When a delete is attempted,
+the webhook looks up matching rules in the registry, builds a per-request dynamic client
+targeting the consumer workspace via the kcp front-proxy
+(`{base}/clusters/{logicalCluster}`), `List`s the dependent type, and filters the results
+in-memory by the rule's field path. If any blocker is found, the request is denied with a
+clear error message listing the dependents. Finalizers are intentionally avoided as they
+conflict with kcp's sync-agent.
 
 ### Architecture
 
@@ -121,16 +140,16 @@ graph LR
     end
 
     subgraph WB["Webhook Binary"]
-        WH["Rule Cache Manager<br/>· Indexed Caches (per rule)<br/>· Deletion Validator"]
+        WH["DependencyRule Reconciler<br/>· Rule Registry (metadata)<br/>· Deletion Validator"]
     end
 
-    subgraph CP["Compute Provider WS"]
+    subgraph CP["Compute Provider Workspace"]
         CPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
         CPExport["APIExport: compute"]
         CPRule["DependencyRule:<br/>VM → VPC"]
     end
 
-    subgraph NP["Network Provider WS"]
+    subgraph NP["Network Provider Workspace"]
         NPBinding["APIBinding: dep-ctrl<br/><i>(claims accepted)</i>"]
         NPExport["APIExport: VPCs"]
         NPWebhook["ValidatingWebhook"]
@@ -140,7 +159,7 @@ graph LR
         ROOTROLE["ClusterRoles<br/>(workspaces/content +<br/>workspace resolution)"]
     end
 
-    subgraph CW["Consumer WS"]
+    subgraph CW["Consumer Workspace"]
         CWBindings["APIBindings:<br/>compute, network"]
         CWResources["VPC, VM"]
     end
@@ -150,8 +169,8 @@ graph LR
     Ctrl -.->|watches rules via VW| DCExport
     Ctrl -.->|installs webhook via VW| NP
     WH -.->|watches rules via VW| DCExport
-    WH -.->|watches VMs via| CPExport
     NPWebhook -.->|dispatches DELETE to| WH
+    WH -.->|on DELETE: lists dependents<br/>via kcp front-proxy| CW
     CWBindings -->|binds to| CPExport
     CWBindings -->|binds to| NPExport
 
@@ -164,18 +183,15 @@ graph LR
     style CW fill:#fef3c7,color:#664d03
 ```
 
-**Two levels of multicluster watching:**
-
-1. **DependencyRule reconciler** (both binaries) watches rules via the dep-ctrl's own
-   APIExport virtual workspace, discovering provider workspaces that bind to the dep-ctrl
-   export.
-
-2. **Indexed cache** (webhook only, dynamic per-rule) watches the dependent resource type
-   (e.g., VMs) via the referenced APIExport's virtual workspace. Field indices enable the
-   webhook to quickly find dependents referencing a given resource.
+**Multicluster watching is one-level only:** both binaries watch
+`DependencyRule` objects via the dep-ctrl APIExport's virtual workspace,
+which spans every provider workspace bound to it. Dependent resources
+(e.g., VMs) are not watched — the webhook lists them on demand from the
+consumer workspace via the kcp front-proxy when validating a DELETE.
 
 For detailed architecture documentation, see [docs/architecture.md](docs/architecture.md).
 For a step-by-step deployment walkthrough, see [docs/getting-started.md](docs/getting-started.md).
+For development setup and project layout, see [docs/development.md](docs/development.md).
 
 ### RBAC Model
 
@@ -185,6 +201,7 @@ created at runtime.
 #### permissionClaims on the dep-ctrl APIExport
 
 The dep-ctrl APIExport declares a `permissionClaim` for:
+
 - `validatingwebhookconfigurations` (admissionregistration.k8s.io) -- to install webhooks
 
 Provider workspaces that bind to the dep-ctrl APIExport must **accept** this claim
@@ -210,30 +227,11 @@ using [kcp-operator](https://github.com/kcp-dev/helm-charts).
 
 ## Development
 
-### Prerequisites
+The fastest way to get a working dev environment is the [Nix flake](flake.nix)
+together with [direnv](https://direnv.net/): `direnv allow` (or `nix develop`)
+drops you into a shell with Go, `golangci-lint`, `helm`, `kind`, and the kcp
+toolchain on `$PATH`. After that, `pre-commit install` registers the project's
+hooks.
 
-- Go 1.26+
-- [kcp](https://github.com/kcp-dev/kcp) binary (for integration tests)
-
-### Build
-
-```sh
-make build
-```
-
-### Run Tests
-
-```sh
-# Unit and integration tests (requires kcp binary)
-make test
-
-# E2E tests (requires kind, helm, docker)
-# Deploys a multi-shard kcp via kcp-operator (root + shard1)
-make test-e2e
-```
-
-### Generate Code
-
-```sh
-make generate
-```
+For project layout, the full `make` target reference, integration- and e2e-test
+internals, and shard-config tips, see [docs/development.md](docs/development.md).
