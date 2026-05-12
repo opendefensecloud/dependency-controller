@@ -46,3 +46,37 @@ func TestResolve_NilObj(t *testing.T) {
 		t.Errorf("Resolve on nil obj = %q, want empty", got)
 	}
 }
+
+func FuzzResolve(f *testing.F) {
+	for _, seed := range []string{
+		".spec.vpcRef.name",
+		"spec.vpcRef.name",
+		".spec.missing.name",
+		".spec.count",
+		".spec.nested.deep",
+		".nothing",
+		"",
+		".",
+		"..",
+		".spec..name",
+	} {
+		f.Add(seed)
+	}
+
+	obj := map[string]any{
+		"spec": map[string]any{
+			"vpcRef": map[string]any{"name": "my-vpc"},
+			"count":  int64(3),
+			"nested": "not-a-map",
+			"list":   []any{"a", "b"},
+			"deep": map[string]any{
+				"deeper": map[string]any{"deepest": "leaf"},
+			},
+		},
+	}
+
+	f.Fuzz(func(_ *testing.T, path string) {
+		_ = Resolve(obj, path)
+		_ = Resolve(nil, path)
+	})
+}
