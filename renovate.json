@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests", "docker:pinDigests"],
   "minimumReleaseAge": "1 day",
   "osvVulnerabilityAlerts": true,
   "vulnerabilityAlerts": {
@@ -22,10 +22,6 @@
       "groupName": "golang version sync",
       "groupSlug": "go-version"
     },
-    {
-      "matchManagers": ["dockerfile"],
-      "pinDigests": true
-    }
   ],
   "customManagers": [
     {
