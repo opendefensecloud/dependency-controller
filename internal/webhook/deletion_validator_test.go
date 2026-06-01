@@ -120,3 +120,41 @@ func TestSkipProtection_WrongValue(t *testing.T) {
 		t.Error("expected skip-protection to not match with value 'false'")
 	}
 }
+
+func FuzzObjectFromRequest(f *testing.F) {
+	for _, seed := range [][]byte{
+		nil,
+		[]byte(``),
+		[]byte(`{}`),
+		[]byte(`null`),
+		[]byte(`{"metadata":{"name":"foo"}}`),
+		[]byte(`{"metadata":{"annotations":{"dependencies.opendefense.cloud/skip-protection":"true"}}}`),
+		[]byte(`{"metadata":{"annotations":{"kcp.io/cluster":"root:org:workspace"}}}`),
+		[]byte(`{"metadata":null}`),
+		[]byte(`{"metadata":{"annotations":null}}`),
+		[]byte(`[]`),
+		[]byte(`"string-not-object"`),
+		[]byte("{\"metadata\":{\"name\":\"\xff\xfe\"}}"),
+		{0x00, 0x01, 0x02},
+	} {
+		f.Add(seed, true)
+		f.Add(seed, false)
+	}
+
+	f.Fuzz(func(_ *testing.T, raw []byte, useOld bool) {
+		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{}}
+		if useOld {
+			req.OldObject = runtime.RawExtension{Raw: raw}
+		} else {
+			req.Object = runtime.RawExtension{Raw: raw}
+		}
+
+		obj, err := objectFromRequest(req)
+		if err != nil {
+			return
+		}
+		_ = obj.GetAnnotations()[AnnotationSkipProtection]
+		_ = obj.GetName()
+		_ = obj.GetNamespace()
+	})
+}
