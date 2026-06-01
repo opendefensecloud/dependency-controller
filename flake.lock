@@ -15,11 +15,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1777371447,
-        "narHash": "sha256-5CcdUMbDm+WYS2sn07AiBBQeJ2mVnm5pG6TAl8UM/UI=",
+        "lastModified": 1780041366,
+        "narHash": "sha256-I1iftykHs00f0+HI/TrMEhcxwOVHMNfG8GjkLnKgTtQ=",
         "owner": "opendefensecloud",
         "repo": "dev-kit",
-        "rev": "5851d224336e5056fe840255f335dfbbe7542d14",
+        "rev": "c53d2a15cd1b83f238c91f174bce003dfb12a71a",
         "type": "github"
       },
       "original": {
@@ -47,15 +47,15 @@
     "flake-compat_2": {
       "flake": false,
       "locked": {
-        "lastModified": 1761588595,
-        "narHash": "sha256-XKUZz9zewJNUj46b4AJdiRZJAvSZ0Dqj2BNfXvFlJC4=",
-        "owner": "edolstra",
+        "lastModified": 1767039857,
+        "narHash": "sha256-vNpUSpF5Nuw8xvDLj2KCwwksIbjua2LZCqhV1LNRDns=",
+        "owner": "NixOS",
         "repo": "flake-compat",
-        "rev": "f387cd2afec9419c8ee37694406ca490c3f34ee5",
+        "rev": "5edf11c44bc78a0d334f6334cdaf7d60d732daab",
         "type": "github"
       },
       "original": {
-        "owner": "edolstra",
+        "owner": "NixOS",
         "repo": "flake-compat",
         "type": "github"
       }
@@ -111,11 +111,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1765016596,
-        "narHash": "sha256-rhSqPNxDVow7OQKi4qS5H8Au0P4S3AYbawBSmJNUtBQ=",
+        "lastModified": 1778507602,
+        "narHash": "sha256-kTwur1wV+01SdqskVMSo6JMEpg71ps3HpbFY2GsflKs=",
         "owner": "cachix",
         "repo": "git-hooks.nix",
-        "rev": "548fc44fca28a5e81c5d6b846e555e6b9c2a5a3c",
+        "rev": "61ab0e80d9c7ab14c256b5b453d8b3fb0189ba0a",
         "type": "github"
       },
       "original": {
@@ -179,11 +179,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1777353526,
-        "narHash": "sha256-lTHdOhBdeI7q6xJZY+K3KNwOfOzqu3wNiRth9vfSnbc=",
+        "lastModified": 1779167584,
+        "narHash": "sha256-iAMW53zbWUrGtLjtq66Sqzbz803aT+IBPg+0l6mztE8=",
         "owner": "purpleclay",
         "repo": "go-overlay",
-        "rev": "39e0a2df70d1a7c6c79ffe96a4b40bee771d95f9",
+        "rev": "1a7dd3c1e396d5d969da6f7a39bc6affd0847f1c",
         "type": "github"
       },
       "original": {
