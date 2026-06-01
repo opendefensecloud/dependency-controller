@@ -53,27 +53,34 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to GHCR (Helm)
-        run: |
-          echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GH_ACTOR" --password-stdin
 
       - name: Extract version from tag
         id: version
+        env:
+          GH_REF: ${{ github.ref }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_SHA: ${{ github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF_NAME#v}
-            echo "source=tag" >> $GITHUB_OUTPUT
+          if [[ "$GH_REF" == refs/tags/* ]]; then
+            VERSION="${GH_REF_NAME#v}"
+            echo "source=tag" >> "$GITHUB_OUTPUT"
           else
-            PR_NUMBER=${{ github.event.pull_request.number }}
-            SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+            SHORT_SHA="${GH_SHA:0:7}"
             VERSION="0.0.0-pr.${PR_NUMBER}.${SHORT_SHA}"
-            echo "source=computed" >> $GITHUB_OUTPUT
+            echo "source=computed" >> "$GITHUB_OUTPUT"
           fi
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Chart version: ${VERSION}"
 
       - name: Update chart version and appVersion
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION=${{ steps.version.outputs.version }}
           for chart in charts/*/; do
             if [ -f "${chart}Chart.yaml" ]; then
               CHART_NAME=$(basename "${chart}")
@@ -86,17 +93,23 @@ jobs:
           done
 
       - name: Package and publish Helm charts
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           for chart in charts/*/; do
             if [ -f "${chart}Chart.yaml" ]; then
               CHART_NAME=$(basename "${chart}")
               echo "Packaging and publishing chart: ${CHART_NAME}"
               helm package "${chart}"
-              PACKAGE=$(ls ${CHART_NAME}-*.tgz)
-              helm push "${PACKAGE}" oci://ghcr.io/${{ github.repository_owner }}/charts &> push-metadata.txt
-              echo "Published ${PACKAGE} to ghcr.io/${{ github.repository_owner }}/charts"
+              PACKAGE=$(ls "${CHART_NAME}"-*.tgz)
+              helm push "${PACKAGE}" "oci://ghcr.io/${REPO_OWNER}/charts" 2>&1 | tee push-metadata.txt
+              echo "Published ${PACKAGE} to ghcr.io/${REPO_OWNER}/charts"
               CHART_DIGEST=$(awk '/Digest: /{print $2}' push-metadata.txt)
-              echo "CHART_DIGEST=${CHART_DIGEST}" | tee -a $GITHUB_ENV
-              cosign sign --yes "ghcr.io/${{ github.repository_owner }}/charts/${CHART_NAME}@${CHART_DIGEST}"
+              if [ -z "${CHART_DIGEST}" ]; then
+                echo "ERROR: failed to extract chart digest from helm push output" >&2
+                exit 1
+              fi
+              echo "CHART_DIGEST=${CHART_DIGEST}" | tee -a "$GITHUB_ENV"
+              cosign sign --yes "ghcr.io/${REPO_OWNER}/charts/${CHART_NAME}@${CHART_DIGEST}"
             fi
           done
