@@ -187,11 +187,31 @@ func (v *DeletionValidator) listDependents(
 	for _, item := range list.Items {
 		val := fieldpath.Resolve(item.Object, entry.MatchedField.FieldPath)
 		if val == targetName {
-			blockers = append(blockers, fmt.Sprintf("%s/%s", entry.State.DependentGVK.Kind, item.GetName()))
+			// A namespaced target is listed within its own namespace, so names
+			// are already unique and the namespace segment would be redundant.
+			// A cluster-scoped target is listed across all namespaces, so qualify
+			// with the dependent's namespace to keep same-named objects distinct.
+			depNamespace := ""
+			if namespace == "" {
+				depNamespace = item.GetNamespace()
+			}
+			blockers = append(blockers, blockerID(entry.State.DependentGVK.Kind, depNamespace, item.GetName()))
 		}
 	}
 
 	return blockers, nil
+}
+
+// blockerID renders a stable, human-readable identifier for a dependent object.
+// When a namespace is supplied it is included so that two objects sharing a
+// name in different namespaces are not conflated — this matters for
+// cluster-scoped deletions, where dependents are listed across all namespaces.
+func blockerID(kind, namespace, name string) string {
+	if namespace != "" {
+		return fmt.Sprintf("%s/%s/%s", kind, namespace, name)
+	}
+
+	return fmt.Sprintf("%s/%s", kind, name)
 }
 
 // dedupeBlockers removes duplicate dependent identifiers while preserving

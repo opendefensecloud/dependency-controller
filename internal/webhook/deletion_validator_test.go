@@ -4,11 +4,17 @@
 package webhook
 
 import (
+	"context"
 	"encoding/json"
+	"reflect"
+	"sort"
 	"testing"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -118,6 +124,114 @@ func TestSkipProtection_WrongValue(t *testing.T) {
 	obj, _ := objectFromRequest(req)
 	if obj.GetAnnotations()[AnnotationSkipProtection] == "true" {
 		t.Error("expected skip-protection to not match with value 'false'")
+	}
+}
+
+func vpcPeering(namespace, name, targetVPC string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "network.test.io/v1",
+		"kind":       "VPCPeering",
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+		"spec":       map[string]any{"targetVpcRef": map[string]any{"name": targetVPC}},
+	}}
+}
+
+func TestListDependents_NamespaceQualification(t *testing.T) {
+	vpcGVR := schema.GroupVersionResource{Group: "network.test.io", Version: "v1", Resource: "vpcs"}
+	vpcPeeringGVR := schema.GroupVersionResource{Group: "network.test.io", Version: "v1", Resource: "vpcpeerings"}
+
+	entry := RuleEntry{
+		State: &RuleState{
+			DependentGVR: vpcPeeringGVR,
+			DependentGVK: schema.GroupVersionKind{Group: "network.test.io", Version: "v1", Kind: "VPCPeering"},
+		},
+		MatchedField: IndexedField{FieldPath: ".spec.targetVpcRef.name", TargetGVR: vpcGVR},
+	}
+
+	newClient := func(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+		return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{vpcPeeringGVR: "VPCPeeringList"},
+			objs...,
+		)
+	}
+
+	v := &DeletionValidator{}
+
+	t.Run("namespaced target renders clean Kind/name", func(t *testing.T) {
+		// Namespaced target: dependents are listed within the target's namespace
+		// only, so names are unique and the namespace segment is redundant.
+		dyn := newClient(vpcPeering("team-a", "peer1", "my-vpc"))
+
+		got, err := v.listDependents(context.Background(), dyn, entry, "my-vpc", "team-a")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"VPCPeering/peer1"}
+		assertBlockers(t, got, want)
+	})
+
+	t.Run("cluster-scoped target keeps same-named dependents distinct", func(t *testing.T) {
+		// Cluster-scoped target (namespace ""): dependents are listed across all
+		// namespaces, so two same-named objects must not be conflated.
+		dyn := newClient(
+			vpcPeering("team-a", "peer1", "global-vpc"),
+			vpcPeering("team-b", "peer1", "global-vpc"),
+		)
+
+		got, err := v.listDependents(context.Background(), dyn, entry, "global-vpc", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"VPCPeering/team-a/peer1", "VPCPeering/team-b/peer1"}
+		assertBlockers(t, got, want)
+	})
+}
+
+func assertBlockers(t *testing.T, got, want []string) {
+	t.Helper()
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("blockers = %v, want %v", got, want)
+	}
+}
+
+func TestBlockerID(t *testing.T) {
+	tests := []struct {
+		name      string
+		kind      string
+		namespace string
+		objName   string
+		want      string
+	}{
+		{
+			name:    "cluster-scoped dependent has no namespace segment",
+			kind:    "VPCPeering",
+			objName: "peer1",
+			want:    "VPCPeering/peer1",
+		},
+		{
+			name:      "namespaced dependent includes its namespace",
+			kind:      "Order",
+			namespace: "team-a",
+			objName:   "order1",
+			want:      "Order/team-a/order1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := blockerID(tt.kind, tt.namespace, tt.objName); got != tt.want {
+				t.Errorf("blockerID(%q, %q, %q) = %q, want %q", tt.kind, tt.namespace, tt.objName, got, tt.want)
+			}
+		})
+	}
+
+	// Same name in different namespaces must not collapse to one identity,
+	// which would hide a genuine blocker for cluster-scoped deletions.
+	if a, b := blockerID("Order", "team-a", "order1"), blockerID("Order", "team-b", "order1"); a == b {
+		t.Errorf("distinct dependents collided: both rendered %q", a)
 	}
 }
 
