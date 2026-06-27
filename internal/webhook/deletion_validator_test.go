@@ -121,6 +121,51 @@ func TestSkipProtection_WrongValue(t *testing.T) {
 	}
 }
 
+func TestDedupeBlockers(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "nil",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "no duplicates preserves order",
+			in:   []string{"VPCPeering/peer1", "VPCPeering/peer2"},
+			want: []string{"VPCPeering/peer1", "VPCPeering/peer2"},
+		},
+		{
+			// A single dependent referencing the target via multiple fields
+			// must be listed once.
+			name: "same dependent collapsed to one",
+			in:   []string{"VPCPeering/peer1", "VPCPeering/peer1", "VPCPeering/peer1"},
+			want: []string{"VPCPeering/peer1"},
+		},
+		{
+			name: "keeps distinct dependents, first-seen order",
+			in:   []string{"VPCPeering/peer1", "VPCPeering/peer2", "VPCPeering/peer1"},
+			want: []string{"VPCPeering/peer1", "VPCPeering/peer2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := dedupeBlockers(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("dedupeBlockers(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("index %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func FuzzObjectFromRequest(f *testing.F) {
 	for _, seed := range [][]byte{
 		nil,

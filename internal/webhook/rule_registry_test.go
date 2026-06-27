@@ -115,6 +115,39 @@ func TestRuleRegistry_MultipleRulesSameTarget(t *testing.T) {
 	}
 }
 
+func TestRuleRegistry_MultipleFieldsSameTarget(t *testing.T) {
+	r := NewRuleRegistry()
+
+	vpcGVR := schema.GroupVersionResource{Group: "network.test.io", Version: "v1", Resource: "vpcs"}
+
+	// A VPCPeering references the same target type (vpcs) via two fields.
+	state := &RuleState{
+		IndexFields: []IndexedField{
+			{FieldPath: ".spec.sourceVpcRef.name", TargetGVR: vpcGVR},
+			{FieldPath: ".spec.targetVpcRef.name", TargetGVR: vpcGVR},
+		},
+	}
+
+	r.Register("cluster1/vpcpeering-deps", state)
+
+	// FindByTargetGVR must return exactly one entry per matching field — not the
+	// N-squared cross product produced when the rule key is indexed once per field.
+	entries := r.FindByTargetGVR(vpcGVR)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries (one per field), got %d", len(entries))
+	}
+
+	seen := map[string]int{}
+	for _, e := range entries {
+		seen[e.MatchedField.FieldPath]++
+	}
+	for _, f := range state.IndexFields {
+		if seen[f.FieldPath] != 1 {
+			t.Errorf("field %q appeared %d times, want 1", f.FieldPath, seen[f.FieldPath])
+		}
+	}
+}
+
 func TestRuleRegistry_UnregisterNonexistent(t *testing.T) {
 	r := NewRuleRegistry()
 	// Should not panic.

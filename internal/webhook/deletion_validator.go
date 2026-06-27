@@ -129,6 +129,10 @@ func (v *DeletionValidator) Handle(ctx context.Context, req admission.Request) a
 		blockers = append(blockers, dependents...)
 	}
 
+	// A dependent that references the deleted resource through more than one
+	// field matches once per field; collapse those into a single mention.
+	blockers = dedupeBlockers(blockers)
+
 	if len(blockers) > 0 {
 		msg := fmt.Sprintf("cannot delete %s/%s: still referenced by %s",
 			req.Resource.Resource, req.Name, strings.Join(blockers, ", "))
@@ -188,6 +192,27 @@ func (v *DeletionValidator) listDependents(
 	}
 
 	return blockers, nil
+}
+
+// dedupeBlockers removes duplicate dependent identifiers while preserving
+// first-seen order, so each referencing object is reported exactly once
+// regardless of how many fields or rules reference the deleted resource.
+func dedupeBlockers(blockers []string) []string {
+	if len(blockers) == 0 {
+		return blockers
+	}
+
+	seen := make(map[string]bool, len(blockers))
+	out := make([]string, 0, len(blockers))
+	for _, b := range blockers {
+		if seen[b] {
+			continue
+		}
+		seen[b] = true
+		out = append(out, b)
+	}
+
+	return out
 }
 
 // objectFromRequest extracts the unstructured object from the admission
