@@ -142,10 +142,20 @@ func (r *RuleRegistry) AllTargetGVRs() []schema.GroupVersionResource {
 
 // rebuildTargetIndex rebuilds the byTarget reverse index from scratch.
 // Must be called with the write lock held.
+//
+// A rule key is added to a GVR's list at most once, even when the rule
+// references that GVR via multiple fields. FindByTargetGVR expands the matching
+// fields per key; indexing the key once per field would otherwise produce an
+// N-squared cross product of entries for a single rule.
 func (r *RuleRegistry) rebuildTargetIndex() {
 	r.byTarget = make(map[schema.GroupVersionResource][]string)
 	for key, state := range r.rules {
+		seen := make(map[schema.GroupVersionResource]bool)
 		for _, f := range state.IndexFields {
+			if seen[f.TargetGVR] {
+				continue
+			}
+			seen[f.TargetGVR] = true
 			r.byTarget[f.TargetGVR] = append(r.byTarget[f.TargetGVR], key)
 		}
 	}
