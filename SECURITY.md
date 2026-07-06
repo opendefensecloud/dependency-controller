@@ -2,6 +2,11 @@
 
 Due to the nature of the Open Defense Cloud products the maintainers take security very seriously.
 
+## Supported Versions
+
+The dependency-controller is currently in **alpha** state. As such, there are no backported security patches or maintenance releases for previous versions.
+Security fixes are released "fail forward" only: a fix ships in the next new version, and users are expected to upgrade to that version to receive it.
+
 ## Reporting a Vulnerability
 
 Open Defense Cloud uses GitHub to allow submission of private security reports. Please report any security finding via
