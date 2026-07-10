@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/opendefensecloud/dependency-controller
-  tag: ""
+  tag: "@sha256:6994912489437ab99e6de008eb38ca9280cde107ea6bd3d6e5afa3af6a9e6dc8"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
