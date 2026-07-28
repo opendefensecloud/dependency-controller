@@ -13,7 +13,7 @@ KCP_VERSION ?= 0.30.0
 IMG_REGISTRY ?= ghcr.io/opendefense
 IMG_TAG ?= latest
 CONTROLLER_IMG ?= $(IMG_REGISTRY)/dependency-controller:$(IMG_TAG)
-WEBHOOK_IMG ?= $(IMG_REGISTRY)/dependency-controller:$(IMG_TAG)
+WEBHOOK_IMG ?= $(IMG_REGISTRY)/dependency-webhook:$(IMG_TAG)
 
 TIMESTAMP := $(shell date '+%Y%m%d%H%M%S')
 DEV_TAG ?= dev.$(TIMESTAMP)
