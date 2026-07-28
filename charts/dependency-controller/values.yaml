@@ -1,6 +1,4 @@
 image:
-  repository: ghcr.io/opendefensecloud/dependency-controller
-  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -14,6 +12,10 @@ kcpBaseHost: ""
 
 # Controller configuration.
 controller:
+  image:
+    repository: ghcr.io/opendefensecloud/dependency-controller
+    tag: ""
+
   replicas: 1
 
   # Secret containing a kubeconfig for connecting to kcp.
@@ -43,6 +45,10 @@ controller:
 
 # Webhook server configuration.
 webhook:
+  image:
+    repository: ghcr.io/opendefensecloud/dependency-webhook
+    tag: ""
+
   replicas: 1
 
   port: 9443
