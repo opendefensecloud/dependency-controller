@@ -1,3 +1,7 @@
+# BREAKING CHANGE: the top-level image.repository and image.tag keys used in
+# chart versions <= 0.4.0 were removed. Set controller.image.repository/tag
+# for the controller image and webhook.image.repository/tag for the webhook
+# image instead — overrides of the old keys are silently ignored.
 image:
   pullPolicy: IfNotPresent
 
