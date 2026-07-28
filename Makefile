@@ -10,7 +10,7 @@ APIGEN ?= $(LOCALGOBIN)/apigen
 KCP ?= $(LOCALBIN)/kcp
 KCP_VERSION ?= 0.30.0
 
-IMG_REGISTRY ?= ghcr.io/opendefense
+IMG_REGISTRY ?= ghcr.io/opendefensecloud
 IMG_TAG ?= latest
 CONTROLLER_IMG ?= $(IMG_REGISTRY)/dependency-controller:$(IMG_TAG)
 WEBHOOK_IMG ?= $(IMG_REGISTRY)/dependency-webhook:$(IMG_TAG)
