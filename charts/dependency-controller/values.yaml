@@ -1,6 +1,8 @@
+# BREAKING CHANGE: the top-level image.repository and image.tag keys used in
+# chart versions <= 0.4.0 were removed. Set controller.image.repository/tag
+# for the controller image and webhook.image.repository/tag for the webhook
+# image instead — overrides of the old keys are silently ignored.
 image:
-  repository: ghcr.io/opendefensecloud/dependency-controller
-  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -14,6 +16,10 @@ kcpBaseHost: ""
 
 # Controller configuration.
 controller:
+  image:
+    repository: ghcr.io/opendefensecloud/dependency-controller
+    tag: ""
+
   replicas: 1
 
   # Secret containing a kubeconfig for connecting to kcp.
@@ -43,6 +49,10 @@ controller:
 
 # Webhook server configuration.
 webhook:
+  image:
+    repository: ghcr.io/opendefensecloud/dependency-webhook
+    tag: ""
+
   replicas: 1
 
   port: 9443

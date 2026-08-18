@@ -21,7 +21,7 @@ spec:
       serviceAccountName: {{ include "dependency-controller.webhook.serviceAccountName" . }}
       containers:
         - name: webhook
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.webhook.image.repository }}:{{ .Values.webhook.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /dependency-webhook
