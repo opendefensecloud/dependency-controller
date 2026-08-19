@@ -7,9 +7,9 @@ what happens outside that range.
 
 | kcp | Kubernetes | Status | Covered by |
 |---|---|---|---|
-| 0.32.x | 1.36 | **Supported** | `make test`, `make test-e2e` |
-| 0.31.x | 1.35 | **Supported** | `make test`, `make test-e2e` |
-| 0.30.x | 1.34 | **Best effort** | `make test` only |
+| 0.32.3 | 1.36 | **Supported** | `make test`, `make test-e2e` |
+| 0.31.6 | 1.35 | **Supported** | `make test`, `make test-e2e` |
+| 0.30.3 | 1.34 | **Best effort** | `make test` only |
 | ≤ 0.29.x | ≤ 1.33 | **Not supported** | — |
 
 **Supported** — exercised by the test matrix and gated in CI. Report bugs.
@@ -28,7 +28,7 @@ kcp SDK version in `go.mod`: the kcp 0.31.x SDK line pins Kubernetes 1.35, and 0
 pins 1.36. The client library version is therefore not independently choosable — it
 moves with the kcp SDK.
 
-Kubernetes supports a client that is at most **one minor ahead** of the API server.
+For this project, a client-go version more than **one minor ahead** of the API server is treated as best effort.
 That gives:
 
 - kcp 0.32 (k8s 1.36) — client and server aligned.

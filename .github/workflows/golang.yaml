@@ -54,7 +54,7 @@ jobs:
       matrix:
         # Supported kcp versions, per docs/compatibility.md. Keep in sync with
         # KCP_VERSIONS in the Makefile.
-        kcp-version: ["0.31.6", "0.32.3"]
+        kcp-version: ["0.30.3", "0.31.6", "0.32.3"]
     name: test (kcp ${{ matrix.kcp-version }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
