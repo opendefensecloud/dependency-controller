@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/kcp-dev/logicalcluster/v3 v3.0.5
 	github.com/kcp-dev/multicluster-provider v0.7.1
-	github.com/kcp-dev/multicluster-provider/client v0.7.1
+	github.com/kcp-dev/multicluster-provider/client v0.8.0
 	github.com/kcp-dev/sdk v0.31.2
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.41.0
