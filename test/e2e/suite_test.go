@@ -31,12 +31,14 @@ var (
 )
 
 const (
-	kindClusterName = "dep-ctrl-e2e"
-	kcpNamespace    = "kcp-system"
-	depNamespace    = "dependency-system"
-	certManagerVer  = "v1.17.2"
-	imageName       = "dependency-controller:integration-test"
-	helmTimeout     = "300s"
+	kindClusterName    = "dep-ctrl-e2e"
+	kcpNamespace       = "kcp-system"
+	depNamespace       = "dependency-system"
+	certManagerVer     = "v1.17.2"
+	kcpOperatorVersion = "0.7.3"
+	imageName          = "dependency-controller:integration-test"
+	webhookImageName   = "dependency-webhook:integration-test"
+	helmTimeout        = "300s"
 
 	// NodePort for the front-proxy service exposed via kind.
 	frontProxyNodePort = "31443"
@@ -362,6 +364,7 @@ func deployKCPOperator() {
 		"--namespace", kcpNamespace,
 		"--create-namespace",
 		"--wait", "--timeout", helmTimeout,
+		"--version", kcpOperatorVersion,
 	)
 }
 
@@ -971,8 +974,12 @@ func extractServerFromKubeconfig(kubeconfig []byte) string {
 
 // portForwardRe matches the "Forwarding from 127.0.0.1:PORT -> ..." line.
 func buildAndLoadImage() {
+	// build controller image and load into kind cluster so the e2e tests can use it.
 	run(dockerBin, "build", "-t", imageName, rootDir)
 	run(kindBin, "load", "docker-image", imageName, "--name", kindClusterName)
+	// build webhook image and load into kind cluster so the e2e tests can use it.
+	run(dockerBin, "build", "-t", webhookImageName, rootDir)
+	run(kindBin, "load", "docker-image", webhookImageName, "--name", kindClusterName)
 }
 
 func setupKCPWorkspaces() {

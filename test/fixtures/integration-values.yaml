@@ -1,9 +1,6 @@
 # Values for integration testing — both components deployed in kind,
 # connecting to kcp via the front-proxy.
-image:
-  repository: dependency-controller
-  tag: integration-test
-  pullPolicy: Never
+
 
 # kcpBaseHost is set dynamically via --set in the e2e test to match
 # the actual front-proxy URL from kcp-operator.
@@ -12,11 +9,19 @@ controller:
   kubeconfig:
     secretName: kcp-controller-kubeconfig
     key: kubeconfig
+  image:
+    repository: dependency-controller
+    tag: integration-test
+    pullPolicy: Never
 
 webhook:
   kubeconfig:
     secretName: kcp-webhook-kubeconfig
     key: kubeconfig
+  image:
+    repository: dependency-controller
+    tag: integration-test
+    pullPolicy: Never
 
   port: 9443
 

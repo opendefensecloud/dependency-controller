@@ -8,7 +8,7 @@ common.mk:
 APIGEN ?= $(LOCALGOBIN)/apigen
 
 KCP ?= $(LOCALBIN)/kcp
-KCP_VERSION ?= 0.30.0
+KCP_VERSION ?= 0.31.6
 
 IMG_REGISTRY ?= ghcr.io/opendefensecloud
 IMG_TAG ?= latest
