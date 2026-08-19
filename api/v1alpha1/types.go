@@ -129,9 +129,3 @@ type DependencyRuleList struct {
 
 	Items []DependencyRule `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(
-		&DependencyRule{}, &DependencyRuleList{},
-	)
-}
