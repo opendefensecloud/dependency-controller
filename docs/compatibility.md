@@ -7,15 +7,19 @@ what happens outside that range.
 
 | kcp | Kubernetes | Status | Covered by |
 |---|---|---|---|
-| 0.32.3 | 1.36 | **Supported** | `make test`, `make test-e2e` |
-| 0.31.6 | 1.35 | **Supported** | `make test`, `make test-e2e` |
-| 0.30.3 | 1.34 | **Best effort** | `make test` only |
+| 0.32.x | 1.36 | **Supported** | `make test`, `make test-e2e` |
+| 0.31.x | 1.35 | **Supported** | `make test`, `make test-e2e` |
+| 0.30.x | 1.34 | **Best effort** | `make test` |
 | ≤ 0.29.x | ≤ 1.33 | **Not supported** | — |
 
-**Supported** — exercised by the test matrix and gated in CI. Report bugs.
+Tested at 0.32.3, 0.31.6 and 0.30.3 — the versions listed in `KCP_VERSIONS`. Other
+patch releases within a supported line are expected to work but are not exercised.
 
-**Best effort** — the test suite passes, but the combination sits outside the
-Kubernetes client/server version skew policy (see below). It may work for your
+**Supported** — `make test` runs in CI on every PR, and `make test-e2e` has been run
+against it. Report bugs.
+
+**Best effort** — `make test` runs in CI on every PR and passes, but e2e does not
+cover it and client-go sits two minors ahead of the server. It may work for your
 workload; verify it yourself and expect no guarantee.
 
 **Not supported** — never exercised. It may still work, but nothing here checks it
@@ -23,21 +27,23 @@ and no compatibility fix will be accepted for it.
 
 ## Why the boundary sits there
 
-The controller is built against `k8s.io/client-go` v0.36, which is derived from the
-kcp SDK version in `go.mod`: the kcp 0.31.x SDK line pins Kubernetes 1.35, and 0.32.x
-pins 1.36. The client library version is therefore not independently choosable — it
-moves with the kcp SDK.
+The controller is built against `k8s.io/client-go` v0.36, which is not independently
+choosable — it moves with the kcp SDK version in `go.mod`: the kcp 0.31.x SDK line
+pins Kubernetes 1.35, and 0.32.x pins 1.36.
 
-For this project, a client-go version more than **one minor ahead** of the API server is treated as best effort.
-That gives:
+client-go publishes no version-skew guarantee. Its compatibility matrix marks an
+exact client/server match as "exactly the same features / API objects", and marks
+*every* other combination identically — "everything they have in common (i.e., most
+APIs) will work" — with no distinction between one minor apart and several. The
+boundary below is therefore this project's own, drawn from what it tests rather than
+from an upstream promise:
 
-- kcp 0.32 (k8s 1.36) — client and server aligned.
-- kcp 0.31 (k8s 1.35) — client one minor ahead, inside the policy.
-- kcp 0.30 (k8s 1.34) — client two minors ahead, **outside** the policy. The
-  integration suite passes, which is why this is "best effort" rather than
-  "not supported", but the skew guarantee does not apply.
+- kcp 0.32 (k8s 1.36) — client and server match exactly.
+- kcp 0.31 (k8s 1.35) — client one minor ahead; integration and e2e suites pass.
+- kcp 0.30 (k8s 1.34) — client two minors ahead. The integration suite passes, which
+  is why this is "best effort" rather than "not supported", but e2e does not cover it.
 
-Older kcp releases fall further outside and are not tested at all.
+Older kcp releases are not tested at all.
 
 ## Running the matrix
 
