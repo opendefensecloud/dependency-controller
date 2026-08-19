@@ -9,7 +9,7 @@ require (
 	github.com/kcp-dev/sdk v0.31.6
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.0
 	k8s.io/api v0.35.4
 	k8s.io/apiextensions-apiserver v0.35.1
 	k8s.io/apimachinery v0.35.4
