@@ -49,6 +49,13 @@ jobs:
   test:
     needs: lint
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Supported kcp versions, per docs/compatibility.md. Keep in sync with
+        # KCP_VERSIONS in the Makefile.
+        kcp-version: ["0.30.3", "0.31.6", "0.32.3"]
+    name: test (kcp ${{ matrix.kcp-version }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -59,4 +66,4 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: make test
+        run: make test KCP_VERSION=${{ matrix.kcp-version }}

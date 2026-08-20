@@ -197,6 +197,7 @@ consumer workspace via the kcp front-proxy when validating a DELETE.
 For detailed architecture documentation, see [docs/architecture.md](docs/architecture.md).
 For a step-by-step deployment walkthrough, see [docs/getting-started.md](docs/getting-started.md).
 For development setup and project layout, see [docs/development.md](docs/development.md).
+For supported kcp versions and how to run the test matrix, see [docs/compatibility.md](docs/compatibility.md).
 
 ### RBAC Model
 
@@ -263,3 +264,6 @@ hooks.
 
 For project layout, the full `make` target reference, integration- and e2e-test
 internals, and shard-config tips, see [docs/development.md](docs/development.md).
+
+The supported kcp versions, and the `make test-matrix` / `make test-e2e-kcp-matrix`
+targets that exercise them, are documented in [docs/compatibility.md](docs/compatibility.md).

@@ -8,7 +8,15 @@ common.mk:
 APIGEN ?= $(LOCALGOBIN)/apigen
 
 KCP ?= $(LOCALBIN)/kcp
+# Primary kcp version: the one CI gates on and the project supports.
 KCP_VERSION ?= 0.31.6
+# kcp versions exercised by the *-matrix targets. See docs/compatibility.md.
+KCP_VERSIONS ?= 0.30.3 0.31.6 0.32.3
+# kcp server version the e2e suite pins on the kcp-operator RootShard, Shard and
+# FrontProxy. Defaults to KCP_VERSION so e2e tests the version we support rather
+# than whatever kcp-operator happens to default to. Set empty to use that default.
+E2E_KCP_VERSION ?= $(KCP_VERSION)
+export E2E_KCP_VERSION
 
 IMG_REGISTRY ?= ghcr.io/opendefensecloud
 IMG_TAG ?= latest
@@ -86,6 +94,14 @@ helm-package: manifests ## Package Helm chart.
 test: $(GINKGO) $(KCP) generate ## Run all tests (excludes e2e).
 	TEST_KCP_ASSETS=$(LOCALBIN) $(GINKGO) -r -cover --fail-fast --require-suite -covermode count --output-dir=$(BUILD_PATH) -coverprofile=coverprofile --skip-package=test/e2e $(testargs)
 
+.PHONY: test-matrix
+test-matrix: ## Run tests against every kcp version in KCP_VERSIONS.
+	@for v in $(KCP_VERSIONS); do \
+		echo ""; \
+		echo "=== make test against kcp $$v ==="; \
+		$(MAKE) --no-print-directory test KCP_VERSION=$$v || exit 1; \
+	done
+
 .PHONY: test-e2e
 test-e2e: $(GINKGO) ## Run e2e tests (kind + kcp + helm). Set E2E_SHARD_CONFIG=single-shard|multi-shard (default: multi-shard).
 	$(GINKGO) -r --fail-fast -v --timeout 30m ./test/e2e/ $(testargs)
@@ -97,7 +113,17 @@ test-e2e-matrix: ## Run e2e tests against both shard configs (single-shard, mult
 	$(MAKE) clean-e2e
 	E2E_SHARD_CONFIG=multi-shard  $(MAKE) test-e2e
 
-.PHONY: e2e-cleanup
+.PHONY: test-e2e-kcp-matrix
+test-e2e-kcp-matrix: ## Run e2e against every kcp version in KCP_VERSIONS.
+	@for v in $(KCP_VERSIONS); do \
+		echo ""; \
+		echo "=== make test-e2e against kcp $$v ==="; \
+		$(MAKE) --no-print-directory clean-e2e; \
+		E2E_KCP_VERSION=$$v $(MAKE) --no-print-directory test-e2e || exit 1; \
+	done
+	$(MAKE) --no-print-directory clean-e2e
+
+.PHONY: clean-e2e
 clean-e2e: ## Remove kind cluster from e2e tests.
 	-$(KIND) delete cluster --name dep-ctrl-e2e 2>/dev/null
 

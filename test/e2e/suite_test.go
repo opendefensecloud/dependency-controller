@@ -107,6 +107,34 @@ func TestE2E(t *testing.T) {
 	RunSpecs(t, "E2E Suite")
 }
 
+// kcpImageBlock renders the optional `image:` stanza for RootShard, Shard and
+// FrontProxy specs.
+// E2E_KCP_VERSION pins the kcp server version so the suite can be run as a
+// matrix (see `make test-e2e-kcp-matrix`); when unset, kcp-operator picks its
+// own default. indent is the number of spaces the stanza is nested at.
+func kcpImageBlock(indent int) string {
+	v := os.Getenv("E2E_KCP_VERSION")
+	if v == "" {
+		return ""
+	}
+
+	pad := strings.Repeat(" ", indent)
+
+	return fmt.Sprintf("\n%[1]simage:\n%[1]s  tag: v%[2]s", pad, v)
+}
+
+// kcpProxyImageBlock renders the `proxy.image` stanza for a RootShard spec. The
+// root shard's built-in proxy is always deployed, and takes its image from
+// spec.proxy.image independently of spec.image, so it needs pinning separately.
+func kcpProxyImageBlock(indent int) string {
+	inner := kcpImageBlock(indent + 2)
+	if inner == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("\n%sproxy:%s", strings.Repeat(" ", indent), inner)
+}
+
 func lookupTool(envVar, fallback string) string {
 	if v := os.Getenv(envVar); v != "" {
 		return v
@@ -534,7 +562,7 @@ kind: RootShard
 metadata:
   name: root
   namespace: %[1]s
-spec:
+spec:%[3]s%[4]s
   external:
     hostname: %[2]s
     port: 6443
@@ -566,7 +594,7 @@ spec:
           hostAliases:
             - ip: "10.96.200.200"
               hostnames:
-                - "%[2]s"`, kcpNamespace, fpHostname))
+                - "%[2]s"`, kcpNamespace, fpHostname, kcpImageBlock(2), kcpProxyImageBlock(2)))
 
 	// Create FrontProxy with a fixed ClusterIP and NodePort for host access.
 	applyToKind(fmt.Sprintf(`apiVersion: operator.kcp.io/v1alpha1
@@ -574,7 +602,7 @@ kind: FrontProxy
 metadata:
   name: kcp
   namespace: %[1]s
-spec:
+spec:%[3]s
   rootShard:
     ref:
       name: root
@@ -592,7 +620,7 @@ spec:
           - localhost
           - "%[2]s"
         ipAddresses:
-          - "127.0.0.1"`, kcpNamespace, fpHostname))
+          - "127.0.0.1"`, kcpNamespace, fpHostname, kcpImageBlock(2)))
 
 	// Wait for the RootShard to be running.
 	waitFor(3*time.Minute, "root shard running", func() error {
@@ -632,7 +660,7 @@ kind: Shard
 metadata:
   name: shard1
   namespace: %[1]s
-spec:
+spec:%[3]s
   rootShard:
     ref:
       name: root
@@ -656,7 +684,7 @@ spec:
           hostAliases:
             - ip: "10.96.200.200"
               hostnames:
-                - "%[2]s"`, kcpNamespace, fpHostname))
+                - "%[2]s"`, kcpNamespace, fpHostname, kcpImageBlock(2)))
 
 	// Wait for the secondary shard to be running.
 	waitFor(3*time.Minute, "shard1 running", func() error {
