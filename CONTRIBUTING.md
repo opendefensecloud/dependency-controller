@@ -90,7 +90,7 @@ review rather than leaving `fixup` commits for the merge to swallow.
 
 Scope with the component where it applies:
 
-```
+```text
 feat(webhook): reject deletion when a dependent resource exists
 fix(controller): requeue on transient APIExport errors
 ci: pin actions/checkout to a commit sha
