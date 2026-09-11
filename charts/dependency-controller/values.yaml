@@ -18,7 +18,7 @@ kcpBaseHost: ""
 controller:
   image:
     repository: ghcr.io/opendefensecloud/dependency-controller
-    tag: ""
+    tag: "@sha256:b4417f0ea68d0742debc6d6a83fac317da995c7620fa66a8efdf49704034c4e3"
 
   replicas: 1
 
@@ -51,7 +51,7 @@ controller:
 webhook:
   image:
     repository: ghcr.io/opendefensecloud/dependency-webhook
-    tag: ""
+    tag: "@sha256:9adf9fad8c25c1a176c4eee632f6dfa2bc6cd846662943da79d6d76a3276dc57"
 
   replicas: 1
 
