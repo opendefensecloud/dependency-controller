@@ -1,9 +1,8 @@
-# kcp-aware Dependency Controller
+# Dependency Controller
 
-[![Build status](https://github.com/opendefensecloud/dependency-controller/actions/workflows/golang.yaml/badge.svg)](https://github.com/opendefensecloud/dependency-controller/actions/workflows/golang.yaml)
-[![Go Report Card](https://goreportcard.com/badge/go.opendefense.cloud/dependency-controller)](https://goreportcard.com/report/go.opendefense.cloud/dependency-controller)
-[![Go Reference](https://pkg.go.dev/badge/go.opendefense.cloud/dependency-controller.svg)](https://pkg.go.dev/go.opendefense.cloud/dependency-controller)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/opendefensecloud/dependency-controller/badge)](https://scorecard.dev/viewer/?uri=github.com/opendefensecloud/dependency-controller)
+[![Build status](https://github.com/opendefensecloud/dependency-controller/actions/workflows/golang.yaml/badge.svg)](https://github.com/opendefensecloud/dependency-controller/actions/workflows/golang.yaml)
+[![Go Reference](https://pkg.go.dev/badge/go.opendefense.cloud/dependency-controller.svg)](https://pkg.go.dev/go.opendefense.cloud/dependency-controller)
 [![GitHub Release](https://img.shields.io/github/v/release/opendefensecloud/dependency-controller)](https://github.com/opendefensecloud/dependency-controller/releases/latest)
 
 ## Problem Statement
