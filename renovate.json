@@ -28,6 +28,14 @@
         "github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
       ],
       "groupName": "golangci-lint"
+    },
+    {
+      "matchManagers": ["helm-values"],
+      "matchPackageNames": [
+        "ghcr.io/opendefensecloud/dependency-controller",
+        "ghcr.io/opendefensecloud/dependency-webhook"
+      ],
+      "enabled": false
     }
   ],
   "customManagers": [
