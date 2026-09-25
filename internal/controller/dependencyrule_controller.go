@@ -200,10 +200,8 @@ func (w *workspaceResolver) ensureResolved(ctx context.Context, paths []string) 
 			continue
 		}
 
-		var parentPath string
-		if i := strings.LastIndex(path, ":"); i >= 0 {
-			parentPath = path[:i]
-		} else {
+		parentPath, _, ok := strings.CutLast(path, ":")
+		if !ok {
 			return fmt.Errorf("workspace path %q must have at least one parent segment", path)
 		}
 
