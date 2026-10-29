@@ -139,8 +139,9 @@ Beyond green checks, the `main` ruleset requires:
   approvals, so re-request review after a fixup
 
 Publishing happens after the merge, not on the PR: pushes to `main` build the
-container image, and a published GitHub release (or a `v*` tag) publishes both
-the image and the Helm chart.
+container image, and a `v*` tag publishes both the image and the Helm chart and
+attaches the signed SBOMs to a draft release. Publishing that draft does not
+rebuild the image.
 
 ## Security
 

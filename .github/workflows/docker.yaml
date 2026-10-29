@@ -6,9 +6,8 @@ env:
   PLATFORMS: linux/amd64,linux/arm64
 
 on:
-  release:
-    types:
-      - published
+  # No release trigger: the tag push builds, signs and attaches the SBOMs.
+  # Rebuilding on publish would move the version tags to unsigned digests.
   push:
     branches:
       - main
@@ -40,8 +39,7 @@ jobs:
     name: Build and Publish Docker Image
     if: |
       github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ok-to-image')) ||
-      (github.event_name == 'release' && github.event.action == 'published')
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ok-to-image'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
