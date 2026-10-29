@@ -141,7 +141,7 @@ Beyond green checks, the `main` ruleset requires:
 Publishing happens after the merge, not on the PR: pushes to `main` build the
 container image, and a `v*` tag publishes both the image and the Helm chart and
 attaches the signed SBOMs to a draft release. Publishing that draft does not
-rebuild the image.
+rebuild the image or republish the chart.
 
 ## Security
 
