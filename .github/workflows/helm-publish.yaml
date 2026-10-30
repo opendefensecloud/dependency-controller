@@ -3,9 +3,8 @@ name: Publish Helm Chart
 permissions: read-all
 
 on:
-  release:
-    types:
-      - published
+  # No release trigger: the tag push already publishes the chart, publishing
+  # the draft release would push the same version a second time.
   push:
     tags:
       - v*
@@ -20,15 +19,14 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       packages: write
       id-token: write
     if: |
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ok-to-helm')) ||
-      (github.event_name == 'release' && github.event.action == 'published')
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ok-to-helm'))
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
