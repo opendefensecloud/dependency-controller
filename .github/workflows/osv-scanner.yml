@@ -6,7 +6,7 @@ on:
   merge_group:
     types: [checks_requested]
   schedule:
-    - cron: "12 12 * * 1"
+    - cron: "0 4 * * *"
   push:
     branches: ["main"]
 
