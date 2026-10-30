@@ -36,6 +36,11 @@
         "ghcr.io/opendefensecloud/dependency-webhook"
       ],
       "enabled": false
+    },
+    {
+      "description": "Renovate only gets release timestamps for Docker Hub tags, not for digests or other registries. Without one, the default timestamp-required behaviour holds those updates (e.g. the distroless and golang digests) at minimumReleaseAge forever.",
+      "matchDatasources": ["docker"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
     }
   ],
   "customManagers": [
