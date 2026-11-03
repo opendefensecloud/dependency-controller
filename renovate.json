@@ -30,6 +30,13 @@
       "groupName": "golangci-lint"
     },
     {
+      "matchPackageNames": [
+        "github.com/onsi/ginkgo/v2",
+        "github.com/onsi/ginkgo/v2/ginkgo"
+      ],
+      "groupName": "ginkgo"
+    },
+    {
       "matchManagers": ["helm-values"],
       "matchPackageNames": [
         "ghcr.io/opendefensecloud/dependency-controller",
