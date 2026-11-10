@@ -10,9 +10,9 @@ what happens outside that range.
 | 0.33.x (≥ 0.33.6) | 1.36 | **Supported** | `make test`, `make test-e2e` |
 | ≤ 0.32.x | ≤ 1.36 | **Not supported** | — |
 
-Tested at 0.33.6, the version listed in `KCP_VERSIONS`. Run kcp 0.33.6 or later:
-earlier 0.33 patch releases are affected by security advisories fixed in 0.33.6 (see
-below).
+Tested at 0.33.6, the version listed in `KCP_VERSIONS`. Run kcp 0.33.6 or a later
+0.33.x patch release: earlier 0.33 patch releases are affected by security advisories
+fixed in 0.33.6 (see below).
 
 **Supported** — `make test` runs in CI on every PR, and `make test-e2e` has been run
 against it. Report bugs.

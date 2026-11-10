@@ -45,7 +45,9 @@ the supported line changes.
 
 ## Consequences
 
-- Deployments on kcp ≤ 0.32 must upgrade to 0.33.6 or later to stay supported.
+- Deployments on kcp ≤ 0.32 must upgrade to 0.33.6 or a later 0.33.x patch release
+  to stay supported. A new kcp minor line (0.34 onwards) is not covered until it is
+  added to the test matrix and `docs/compatibility.md`.
 - The CI matrix shrinks to one kcp version, so CI is faster but no longer detects
   regressions against older lines. That is intended: such regressions would not be
   fixed.
