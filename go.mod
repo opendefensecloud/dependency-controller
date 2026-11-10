@@ -7,7 +7,7 @@ require (
 	github.com/kcp-dev/multicluster-provider v0.8.0
 	github.com/kcp-dev/multicluster-provider/client v0.9.0
 	github.com/kcp-dev/sdk v0.33.6
-	github.com/onsi/ginkgo/v2 v2.33.1
+	github.com/onsi/ginkgo/v2 v2.34.0
 	github.com/onsi/gomega v1.44.0
 	k8s.io/api v0.36.3
 	k8s.io/apiextensions-apiserver v0.36.3
