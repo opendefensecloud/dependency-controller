@@ -35,7 +35,7 @@ const (
 	kcpNamespace       = "kcp-system"
 	depNamespace       = "dependency-system"
 	certManagerVer     = "v1.17.2"
-	kcpOperatorVersion = "0.7.3"
+	kcpOperatorVersion = "0.7.13"
 	imageName          = "dependency-controller:integration-test"
 	webhookImageName   = "dependency-webhook:integration-test"
 	helmTimeout        = "300s"
