@@ -1,6 +1,6 @@
 module go.opendefense.cloud/dependency-controller
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/kcp-dev/logicalcluster/v3 v3.0.5
