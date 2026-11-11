@@ -17,10 +17,13 @@
       "rangeStrategy": "bump"
     },
     {
+      "description": "Move the Go version in go.mod, flake.nix and the Dockerfile builder image together. minimumGroupSize holds the branch until all three have passed minimumReleaseAge; otherwise the image (published hours after the Go release) is left out and the image build fails on a go.mod that requires a newer Go. Digest-only image updates are excluded, as they never come in threes.",
       "matchDatasources": ["docker", "golang-version"],
       "matchPackageNames": ["go", "golang"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
       "groupName": "golang version sync",
-      "groupSlug": "go-version"
+      "groupSlug": "go-version",
+      "minimumGroupSize": 3
     },
     {
       "matchPackageNames": [
