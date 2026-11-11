@@ -31,14 +31,16 @@ var (
 )
 
 const (
-	kindClusterName    = "dep-ctrl-e2e"
-	kcpNamespace       = "kcp-system"
-	depNamespace       = "dependency-system"
-	certManagerVer     = "v1.17.2"
-	kcpOperatorVersion = "0.7.3"
-	imageName          = "dependency-controller:integration-test"
-	webhookImageName   = "dependency-webhook:integration-test"
-	helmTimeout        = "300s"
+	kindClusterName = "dep-ctrl-e2e"
+	kcpNamespace    = "kcp-system"
+	depNamespace    = "dependency-system"
+	certManagerVer  = "v1.17.2"
+	// Version of the kcp-operator Helm chart, not of the operator itself: the
+	// chart is versioned separately (chart 0.7.13 ships operator v0.10.3).
+	kcpOperatorChartVersion = "0.7.13"
+	imageName               = "dependency-controller:integration-test"
+	webhookImageName        = "dependency-webhook:integration-test"
+	helmTimeout             = "300s"
 
 	// NodePort for the front-proxy service exposed via kind.
 	frontProxyNodePort = "31443"
@@ -392,7 +394,7 @@ func deployKCPOperator() {
 		"--namespace", kcpNamespace,
 		"--create-namespace",
 		"--wait", "--timeout", helmTimeout,
-		"--version", kcpOperatorVersion,
+		"--version", kcpOperatorChartVersion,
 	)
 }
 

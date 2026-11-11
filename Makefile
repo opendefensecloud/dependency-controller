@@ -9,9 +9,9 @@ APIGEN ?= $(LOCALGOBIN)/apigen
 
 KCP ?= $(LOCALBIN)/kcp
 # Primary kcp version: the one CI gates on and the project supports.
-KCP_VERSION ?= 0.31.6
+KCP_VERSION ?= 0.33.6
 # kcp versions exercised by the *-matrix targets. See docs/compatibility.md.
-KCP_VERSIONS ?= 0.30.3 0.31.6 0.32.3
+KCP_VERSIONS ?= 0.33.6
 # kcp server version the e2e suite pins on the kcp-operator RootShard, Shard and
 # FrontProxy. Defaults to KCP_VERSION so e2e tests the version we support rather
 # than whatever kcp-operator happens to default to. Set empty to use that default.
