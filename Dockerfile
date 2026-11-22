@@ -25,20 +25,20 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o bin/dependency-webhook ./cmd/webhook/
 
-FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS controller
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 AS controller
 WORKDIR /
 COPY --from=controller-builder /workspace/bin/dependency-controller .
 USER 65532:65532
 ENTRYPOINT ["/dependency-controller"]
 
-FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS webhook
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5 AS webhook
 WORKDIR /
 COPY --from=webhook-builder /workspace/bin/dependency-webhook .
 USER 65532:65532
 ENTRYPOINT ["/dependency-webhook"]
 
 # Combined image with both binaries (used by e2e tests and single-image deployments).
-FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
+FROM gcr.io/distroless/static:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 WORKDIR /
 COPY --from=controller-builder /workspace/bin/dependency-controller .
 COPY --from=webhook-builder /workspace/bin/dependency-webhook .
