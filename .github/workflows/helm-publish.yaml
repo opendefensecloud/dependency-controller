@@ -1,6 +1,7 @@
 name: Publish Helm Chart
 
-permissions: read-all
+permissions:
+  contents: read
 
 on:
   # No release trigger: the tag push already publishes the chart, publishing
