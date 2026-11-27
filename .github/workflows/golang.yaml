@@ -75,4 +75,6 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: make test KCP_VERSION=${{ matrix.kcp-version }}
+        env:
+          KCP_VERSION: ${{ matrix.kcp-version }}
+        run: make test KCP_VERSION="${KCP_VERSION}"
